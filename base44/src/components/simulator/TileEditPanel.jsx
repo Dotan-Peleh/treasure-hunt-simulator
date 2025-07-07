@@ -96,14 +96,31 @@ export default function TileEditPanel({ tile, onUpdate, itemChains, onClose }) {
             </div>
             <div>
               <Label htmlFor="req-level">Required Item Level (Max: {maxLevel})</Label>
-              <Input
-                id="req-level"
-                type="number"
-                min="1"
-                max={maxLevel}
-                value={editState.required_item_level}
-                onChange={(e) => setEditState(p => ({ ...p, required_item_level: Math.min(parseInt(e.target.value) || 1, maxLevel) }))}
-              />
+              <div className="flex items-center gap-1">
+                <Button
+                  size="icon"
+                  variant="outline"
+                  onClick={() => setEditState(p => ({ ...p, required_item_level: Math.max(1, p.required_item_level - 1) }))}
+                >
+                  -
+                </Button>
+                <Input
+                  id="req-level"
+                  type="number"
+                  min="1"
+                  max={maxLevel}
+                  value={editState.required_item_level}
+                  className="w-20 text-center"
+                  onChange={(e) => setEditState(p => ({ ...p, required_item_level: Math.min(Math.max(1, parseInt(e.target.value) || 1), maxLevel) }))}
+                />
+                <Button
+                  size="icon"
+                  variant="outline"
+                  onClick={() => setEditState(p => ({ ...p, required_item_level: Math.min(maxLevel, p.required_item_level + 1) }))}
+                >
+                  +
+                </Button>
+              </div>
             </div>
           </>
         )}

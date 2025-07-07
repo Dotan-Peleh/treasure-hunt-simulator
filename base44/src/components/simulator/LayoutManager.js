@@ -13,34 +13,47 @@ export class LayoutManager {
         this.cols = grid[0].length;
     }
 
-    generateLayout(pathCount = 2) {
-        const pathConfigs = this.getPathConfigs(pathCount);
+    generateLayout(pathCount = 2, pattern = 'random') {
+        const pathConfigs = this.getPathConfigs(pathCount, pattern);
         
         pathConfigs.forEach((config, index) => {
+            // Draw main path segment
             this.drawPath(config.start, config.end, `path${index + 1}`);
+            // Immediately connect this path’s end-point to the key with neutral bridges
+            this.drawPath(config.end, this.keyPos, 'bridge');
         });
-
-        // The validation function in BoardGenerator will handle connecting these paths to the key.
-        if (pathConfigs.length > 0) {
-            const lastPath = pathConfigs[pathConfigs.length - 1];
-            const finalApproachTile = this.drawPath(lastPath.end, this.keyPos, 'bridge');
-            this.addDecoyRocks(finalApproachTile);
-        }
 
         return this.grid;
     }
 
-    getPathConfigs(pathCount) {
+    getPathConfigs(pathCount, pattern) {
         const configs = [];
         const startCols = this.getEvenlySpacedCols(pathCount);
 
+        if (pattern === 'y_junction' && pathCount >= 2) {
+            const midPoint = {
+                r: Math.floor(this.rows / 2) + (Math.random() < 0.5 ? -1 : 1),
+                c: Math.floor(this.cols / 2) + (Math.random() < 0.5 ? -1 : 1)
+            };
+            // Two paths meet at midPoint, then one path from there to key
+            configs.push({ start: { r: this.rows - 2, c: startCols[0] }, end: midPoint });
+            configs.push({ start: { r: this.rows - 2, c: startCols[startCols.length-1] }, end: midPoint });
+            return configs;
+        }
+
         for (let i = 0; i < pathCount; i++) {
-            const startRow = (this.rows - 1) - Math.floor(Math.random() * 3);
+            const startRow = (this.rows - 1) - Math.floor(Math.random() * 2);
             const endPoint = this.getRandomEndPoint();
-            configs.push({
-                start: { r: startRow, c: startCols[i] },
-                end: endPoint,
-            });
+
+            if (pattern === 'vertical_lanes') {
+                endPoint.c = startCols[i]; // End in same column as start
+            } else if (pattern === 's_curves' && pathCount === 2) {
+                // Mirrored start/end points for S-shape
+                const endCol = this.cols - 1 - startCols[i];
+                endPoint.c = endCol;
+            }
+
+            configs.push({ start: { r: startRow, c: startCols[i] }, end: endPoint });
         }
         return configs;
     }
@@ -50,16 +63,6 @@ export class LayoutManager {
         const row = Math.floor(Math.random() * (this.rows / 3)) + 1;
         const col = Math.floor(Math.random() * (this.cols));
         return { r: row, c: col };
-    }
-
-    addDecoyRocks(finalApproachTile) {
-        if (!finalApproachTile) return;
-        const { r, c } = finalApproachTile;
-        for (let col = c + 1; col < this.cols; col++) {
-            if (this.grid[r][col] !== 'key') {
-                this.grid[r][col] = 'rock';
-            }
-        }
     }
 
     getEvenlySpacedCols(count, jitter = false) {
@@ -76,37 +79,48 @@ export class LayoutManager {
     }
 
     drawPath(start, end, type) {
-        // This is a simplified path drawing algorithm.
-        // A* or other pathfinding would be more robust but is more complex.
+        // Simple Manhattan-ish walk with slight randomness.
         let current = { ...start };
 
         while (current.r !== end.r || current.c !== end.c) {
-            if(this.grid[current.r][current.c] !== 'start') {
+            // Mark current cell (skip if start or key)
+            if (this.grid[current.r][current.c] !== 'start' && this.grid[current.r][current.c] !== 'key') {
                 this.grid[current.r][current.c] = type;
             }
 
             const moveR = Math.sign(end.r - current.r);
             const moveC = Math.sign(end.c - current.c);
 
-            const nextR = current.r + moveR;
-            const nextC = current.c + moveC;
-
-            // Prevent path from immediately overwriting itself
-            if(nextR === end.r && nextC === end.c) {
-                // We have arrived next to the destination, so we can stop.
-                break;
+            // 20% chance to add a sideways/vertical detour to create zig-zag shapes
+            if (Math.random() < 0.2) {
+                const sideMoves = [];
+                if (current.c + 1 < this.cols && this.grid[current.r][current.c + 1] !== 'key') sideMoves.push({ dr: 0, dc: 1 });
+                if (current.c - 1 >= 0 && this.grid[current.r][current.c - 1] !== 'key') sideMoves.push({ dr: 0, dc: -1 });
+                if (current.r + 1 < this.rows && this.grid[current.r + 1][current.c] !== 'key') sideMoves.push({ dr: 1, dc: 0 });
+                if (current.r - 1 >= 0 && this.grid[current.r - 1][current.c] !== 'key') sideMoves.push({ dr: -1, dc: 0 });
+                if (sideMoves.length) {
+                    const pick = sideMoves[Math.floor(Math.random() * sideMoves.length)];
+                    current.r += pick.dr;
+                    current.c += pick.dc;
+                    continue; // skip normal move this iteration
+                }
             }
 
-            // Randomly decide whether to move horizontally or vertically first
-            if (Math.random() < 0.5 && current.r !== end.r) {
+            // Otherwise move toward the end point (Manhattan)
+            if (moveR !== 0 && moveC !== 0) {
+                if (Math.random() < 0.5) current.r += moveR; else current.c += moveC;
+            } else if (moveR !== 0) {
                 current.r += moveR;
-            } else if (current.c !== end.c) {
+            } else if (moveC !== 0) {
                 current.c += moveC;
-            } else if (current.r !== end.r) {
-                current.r += moveR;
             }
         }
-        // DO NOT OVERWRITE THE END TILE
-        return current;
+
+        // Write the end cell if it's not the key
+        if (this.grid[end.r][end.c] !== 'key') {
+            this.grid[end.r][end.c] = type;
+        }
+
+        return end;
     }
 } 

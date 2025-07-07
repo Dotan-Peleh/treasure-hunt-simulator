@@ -1,10 +1,233 @@
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Key, Zap, Lock, Mountain, Circle } from 'lucide-react';
+import { Key, Zap, Lock, Mountain, Circle, Flag, CheckCircle } from 'lucide-react';
 import PropTypes from 'prop-types';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { useState, useMemo, useEffect } from 'react';
+import { Button } from '@/components/ui/button';
 
 export default function LayoutPreview({ layout, analysis, showDetails = true, compact = false }) {
-  if (!layout || !layout.tiles) {
+  // Local mutable copies so we can tweak levels without touching parent data
+  const [localLayout, setLocalLayout] = useState(layout);
+  const [localAnalysis, setLocalAnalysis] = useState(analysis);
+
+  // Sync when parent supplies a new layout
+  useEffect(() => {
+    setLocalLayout(layout);
+    setLocalAnalysis(analysis);
+    setSelectedPathIndex(null);
+  }, [layout, analysis]);
+
+  const [selectedPathIndex, setSelectedPathIndex] = useState(null);
+  // Local feedback state: { label: "good"|"bad"|null, comment: string, entryOverride: "r,c"|null }
+  const [feedback, setFeedback] = useState(() => {
+    const init = { label: null, comment: '', entryOverride: [], suppressFlags: [] };
+    if (typeof window === 'undefined') return init;
+    try {
+      const stored = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
+      const raw = stored[layout.id];
+      if (!raw) return init;
+      if (typeof raw === 'string') return { ...init, label: raw }; // backward-compat
+      if (raw && raw.entryOverride && !Array.isArray(raw.entryOverride)) {
+         raw.entryOverride = raw.entryOverride ? [raw.entryOverride] : [];
+      }
+      if (raw && raw.suppressFlags === undefined) raw.suppressFlags = [];
+      return { ...init, ...raw };
+    } catch {
+      return init;
+    }
+  });
+
+  const persist = (next) => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
+      stored[layout.id] = next;
+      localStorage.setItem('layoutFeedback', JSON.stringify(stored));
+    } catch {/* ignore */}
+  };
+
+  const updateFeedback = (patch) => {
+    setFeedback(prev => {
+      const next = { ...prev, ...patch };
+      persist(next);
+      return next;
+    });
+  };
+
+  const [editingEntry, setEditingEntry] = useState(false);
+
+  // Helper to adjust every tile level in the selected path by delta (+1 or -1)
+  const adjustPathLevels = (delta) => {
+    if (selectedPathIndex === null) return;
+    const path = localAnalysis?.all_paths?.[selectedPathIndex];
+    if (!path || !path.path) return;
+
+    const stepCost = (level) => Math.pow(2, level - 1);
+
+    const newTiles = localLayout.tiles.map(t => ({ ...t }));
+    let newCost = 0;
+
+    path.path.forEach(coord => {
+      const [r, c] = coord.split(',').map(Number);
+      const idx = newTiles.findIndex(t => t.row === r + 1 && t.col === c + 1);
+      if (idx === -1) return;
+      const tile = { ...newTiles[idx] };
+      if (!tile.required_item_level) return;
+      const chainMax = 12; // hard cap; could derive from chain meta
+      const newLevel = Math.min(chainMax, Math.max(1, tile.required_item_level + delta));
+      tile.required_item_level = newLevel;
+      if (tile.required_item_name) {
+        const parts = tile.required_item_name.split(' L');
+        tile.required_item_name = `${parts[0]} L${newLevel}`;
+      }
+      newTiles[idx] = tile;
+      newCost += stepCost(newLevel);
+    });
+
+    // Update analysis cost arrays
+    const newAnalysis = { ...localAnalysis };
+    newAnalysis.path_costs = [...newAnalysis.path_costs];
+    newAnalysis.path_costs[selectedPathIndex] = Math.ceil(newCost);
+    if (newAnalysis.all_paths && newAnalysis.all_paths[selectedPathIndex]) {
+      newAnalysis.all_paths = [...newAnalysis.all_paths];
+      newAnalysis.all_paths[selectedPathIndex] = { ...newAnalysis.all_paths[selectedPathIndex], cost: Math.ceil(newCost) };
+    }
+
+    setLocalLayout({ ...localLayout, tiles: newTiles });
+    setLocalAnalysis(newAnalysis);
+  };
+
+  const balancePathToAverage = () => {
+    if (selectedPathIndex === null || !localAnalysis?.path_costs) return;
+
+    const otherCosts = localAnalysis.path_costs.filter((_, idx) => idx !== selectedPathIndex);
+    if (otherCosts.length === 0) return; // Cannot balance a single path
+
+    const targetCost = otherCosts.reduce((a, b) => a + b, 0) / otherCosts.length;
+    let currentCost = localAnalysis.path_costs[selectedPathIndex];
+    
+    const path = localAnalysis.all_paths[selectedPathIndex];
+    if (!path || !path.path) return;
+    
+    const newTiles = localLayout.tiles.map(t => ({...t}));
+    const pathTileRefs = path.path.map(coord => {
+        const [r, c] = coord.split(',').map(Number);
+        return newTiles.find(t => t.row === r + 1 && t.col === c + 1);
+    }).filter(t => t && t.required_item_level);
+
+    if (pathTileRefs.length === 0) return;
+
+    const stepCost = (level) => Math.pow(2, level-1);
+    let iterations = 0;
+
+    while (Math.abs(currentCost - targetCost) > 5 && iterations < 100) {
+        if (currentCost > targetCost) {
+            // Path is too expensive, lower the highest level
+            pathTileRefs.sort((a,b) => (b.required_item_level || 0) - (a.required_item_level || 0));
+            const tileToChange = pathTileRefs.find(t => t.required_item_level > 2);
+            if (!tileToChange) break;
+            currentCost -= stepCost(tileToChange.required_item_level) - stepCost(tileToChange.required_item_level - 1);
+            tileToChange.required_item_level--;
+        } else {
+            // Path is too cheap, raise the lowest level
+            pathTileRefs.sort((a,b) => (a.required_item_level || 0) - (b.required_item_level || 0));
+            const tileToChange = pathTileRefs.find(t => t.required_item_level < 12);
+            if (!tileToChange) break;
+            currentCost -= stepCost(tileToChange.required_item_level) - stepCost(tileToChange.required_item_level + 1);
+            tileToChange.required_item_level++;
+        }
+        iterations++;
+    }
+
+    // Update names and analysis
+    newTiles.forEach(t => {
+      if(t.required_item_name) {
+        const parts = t.required_item_name.split(' L');
+        t.required_item_name = `${parts[0]} L${t.required_item_level}`;
+      }
+    });
+
+    const newAnalysis = { ...localAnalysis };
+    newAnalysis.path_costs = [...newAnalysis.path_costs];
+    newAnalysis.path_costs[selectedPathIndex] = Math.ceil(currentCost);
+    if (newAnalysis.all_paths && newAnalysis.all_paths[selectedPathIndex]) {
+      newAnalysis.all_paths = [...newAnalysis.all_paths];
+      newAnalysis.all_paths[selectedPathIndex] = { ...newAnalysis.all_paths[selectedPathIndex], cost: Math.ceil(currentCost) };
+    }
+
+    setLocalLayout({ ...localLayout, tiles: newTiles });
+    setLocalAnalysis(newAnalysis);
+  };
+
+  const exportFeedback = () => {
+    try {
+      // Retrieve stored feedback for all layouts (needed to keep thumbs up/down etc.)
+      const all = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
+      const thisLayoutFeedback = all[layout.id] || feedback;
+
+      const data = {
+        exported_at: new Date().toISOString(),
+        layouts: [
+          {
+            ...layout,
+            analysis: analysis || null,
+            feedback: thisLayoutFeedback
+          }
+        ]
+      };
+
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `layout-feedback-${layout.id}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch {/* ignore */}
+  };
+
+  // When a new layout is rendered, reload its stored feedback (or blank) and reset UI state
+  useEffect(() => {
+    const init = { label: null, comment: '', entryOverride: [], suppressFlags: [] };
+    try {
+      const stored = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
+      const raw = stored[layout.id];
+      const fresh = raw
+        ? (typeof raw === 'string' ? { ...init, label: raw } : { ...init, ...raw })
+        : init;
+      setFeedback(fresh);
+    } catch {
+      setFeedback(init);
+    }
+    setSelectedPathIndex(null);
+    setEditingEntry(false);
+  }, [layout.id]);
+
+  // Map entry-point coordinates (first key in each path) → path index
+  const pathEntryMap = useMemo(() => {
+    if (!localAnalysis?.all_paths) return {};
+    const map = {};
+    localAnalysis.all_paths.forEach((p, idx) => {
+      if (p.path && p.path.length > 0) {
+        const key = p.path[0];
+        if (!map[key]) map[key] = [];
+        map[key].push(idx);
+      }
+    });
+    return map;
+  }, [localAnalysis]);
+
+  const selectedPathKeys = useMemo(() => {
+    if (!localAnalysis?.all_paths) return [];
+    if (selectedPathIndex !== null) {
+      return localAnalysis.all_paths[selectedPathIndex]?.path || [];
+    }
+    return [];
+  }, [selectedPathIndex, localAnalysis]);
+
+  if (!localLayout || !localLayout.tiles) {
     return (
       <Card>
         <CardContent className="pt-6">
@@ -17,7 +240,7 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
   // Convert tiles to grid for visualization
   const grid = Array(9).fill(null).map(() => Array(7).fill(null));
   
-  layout.tiles.forEach(tile => {
+  localLayout.tiles.forEach(tile => {
     const row = tile.row - 1;
     const col = tile.col - 1;
     if (row >= 0 && row < 9 && col >= 0 && col < 7) {
@@ -48,6 +271,7 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
     if (!tile) return null;
     if (tile.tile_type === 'key') return <Key className="w-4 h-4 text-purple-700" />;
     if (tile.item?.type === 'generator') return <Zap className="w-4 h-4 text-yellow-600" />;
+    // ENTRY-POINT WITH REQUIREMENT: overlay flag in corner
     if (tile.required_item_name) {
       const level = tile.required_item_level;
       const color = tile.required_item_chain_color;
@@ -56,13 +280,27 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
         blue: 'text-blue-600',
         green: 'text-green-600',
       };
-      return (
+
+      const requirementContent = (
         <div className="flex items-center gap-0.5">
           <Circle className={`w-3 h-3 ${colorMap[color] || 'text-gray-500'}`} />
           <span className="font-bold text-xs">{level}</span>
         </div>
       );
+
+      if (tile.isEntryPoint) {
+        return (
+          <div className="relative flex items-center justify-center">
+            {requirementContent}
+            <Flag className="w-3 h-3 text-red-500 absolute -top-1 -right-1" />
+          </div>
+        );
+      }
+
+      return requirementContent;
     }
+
+    if (tile.isEntryPoint) return <Flag className="w-4 h-4 text-red-500" />;
     if (tile.tile_type === 'semi_locked') return <Lock className="w-4 h-4 text-yellow-700" />;
     if (tile.tile_type === 'rock') return <Mountain className="w-4 h-4 text-gray-600" />;
     
@@ -79,7 +317,7 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
   const boardGrid = (
     <div className={`relative grid grid-cols-7 gap-1 ${compact ? 'p-1 bg-slate-200' : 'p-2 bg-gray-100'} rounded-lg`}>
         {/* Dynamic Milestone Lines */}
-        {!compact && analysis?.milestones && analysis.milestones.map((milestone, index) => {
+        {!compact && localAnalysis?.milestones && localAnalysis.milestones.map((milestone, index) => {
           const topPercentage = ((milestone.row -1) / 9) * 100;
           const colorNames = ['green', 'yellow', 'red'];
           const colorName = colorNames[index % colorNames.length] || 'blue';
@@ -96,20 +334,51 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
             </div>
           );
         })}
-        {grid.map((row, rowIndex) => 
-            row.map((tile, colIndex) => (
-            <div
+        {grid.flatMap((row, rowIndex) =>
+          row.map((tile, colIndex) => {
+            const coord = `${rowIndex},${colIndex}`;
+            return (
+              <div
                 key={`${rowIndex}-${colIndex}`}
-                className={`
-                ${compact ? 'w-7 h-7' : 'w-8 h-8'} border rounded flex items-center justify-center text-xs font-medium
+                onClick={() => {
+                  if (editingEntry) {
+                    if (tile?.isEntryPoint) {
+                      const sup = Array.isArray(feedback.suppressFlags) ? [...feedback.suppressFlags] : [];
+                      const si = sup.indexOf(coord);
+                      if (si === -1) sup.push(coord); else sup.splice(si,1);
+                      updateFeedback({ suppressFlags: sup });
+                    } else {
+                      const arr = Array.isArray(feedback.entryOverride) ? [...feedback.entryOverride] : [];
+                      const idx = arr.indexOf(coord);
+                      if (idx === -1) arr.push(coord); else arr.splice(idx,1);
+                      updateFeedback({ entryOverride: arr });
+                    }
+                    setEditingEntry(false);
+                    return;
+                  }
+                  if (pathEntryMap[coord]) {
+                    const pathsForEntry = pathEntryMap[coord];
+                    const currentIdxInList = pathsForEntry.indexOf(selectedPathIndex);
+                    const nextIdx = currentIdxInList === -1 || currentIdxInList === pathsForEntry.length - 1 ? 0 : currentIdxInList + 1;
+                    setSelectedPathIndex(pathsForEntry[nextIdx]);
+                  }
+                }}
+                className={`${compact ? 'w-7 h-7' : 'w-8 h-8'} relative border rounded flex items-center justify-center text-xs font-medium transition-all cursor-pointer
                 ${getTileColor(tile)}
-                ${tile?.discovered ? 'ring-2 ring-blue-400' : ''}
-                `}
+                ${selectedPathKeys.includes(coord) ? 'ring-2 ring-offset-1 ring-red-500' : (tile?.discovered ? 'ring-2 ring-blue-400' : '')}
+                ${editingEntry ? 'animate-pulse' : ''}`}
                 title={tile ? `${tile.tile_type}${tile.required_item_name ? ` - ${tile.required_item_name}` : ''}` : 'Empty'}
-            >
+              >
                 {getTileContent(tile)}
-            </div>
-            ))
+                {tile?.isEntryPoint && Array.isArray(feedback.suppressFlags) && feedback.suppressFlags.includes(coord) && (
+                  <div className="absolute inset-0 bg-white/60 flex items-center justify-center pointer-events-none"></div>
+                )}
+                {Array.isArray(feedback.entryOverride) && feedback.entryOverride.includes(coord) && !tile?.isEntryPoint && (
+                  <Flag className="w-3 h-3 text-blue-500 absolute -top-1 -right-1" />
+                )}
+              </div>
+            );
+          })
         )}
     </div>
   );
@@ -121,20 +390,68 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
   return (
     <Card className="w-full">
       <CardHeader>
-        <CardTitle className="text-lg flex items-center justify-between">
-          <span>{layout.name || `Layout ${layout.id}`}</span>
+        <CardTitle className="text-lg flex items-center justify-between gap-2">
+          <span>{localLayout.name || `Layout ${localLayout.id}`}</span>
           <div className="flex gap-1">
-            <Badge variant="outline">#{layout.id}</Badge>
-            {analysis?.path_info?.has_connection && (
+            <Badge variant="outline">#{localLayout.id}</Badge>
+            {localAnalysis?.path_info?.has_connection && (
               <Badge variant="secondary">Connected</Badge>
             )}
+          </div>
+          <div className="flex gap-1 ml-2">
+             <button
+               onClick={() => updateFeedback({ label: 'good' })}
+               className={`px-2 py-0.5 text-xs rounded border ${feedback.label==='good' ? 'bg-green-100 border-green-400' : 'border-gray-300'}`}>👍</button>
+             <button
+               onClick={() => updateFeedback({ label: 'bad' })}
+               className={`px-2 py-0.5 text-xs rounded border ${feedback.label==='bad' ? 'bg-red-100 border-red-400' : 'border-gray-300'}`}>👎</button>
+             <button
+               title="Edit entry flag"
+               onClick={() => setEditingEntry(e => !e)}
+               className={`px-2 py-0.5 text-xs rounded border ${editingEntry ? 'bg-blue-100 border-blue-400' : 'border-gray-300'}`}>✏️</button>
+             <button
+               title="Export feedback JSON"
+               onClick={exportFeedback}
+               className="px-2 py-0.5 text-xs rounded border border-gray-300">📤</button>
           </div>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Board Visualization */}
-        <div className="flex justify-center">
+        <div className="flex justify-center relative">
+            {!compact && (
+              <>
+                {/* Column labels */}
+                <div className="absolute -top-5 left-0 right-0 flex justify-center gap-1">
+                  {Array.from({ length: 7 }).map((_, idx) => (
+                    <div key={`col-label-${idx}`} className="w-8 text-center text-xs text-gray-600">
+                      {idx + 1}
+                    </div>
+                  ))}
+                </div>
+                {/* Row labels */}
+                <div className="absolute inset-y-0 -left-5 flex flex-col justify-center gap-1">
+                  {Array.from({ length: 9 }).map((_, idx) => (
+                    <div key={`row-label-${idx}`} className="h-8 flex items-center justify-center text-xs text-gray-600">
+                      {9 - idx}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
             {boardGrid}
+        </div>
+
+        {/* Comment box */}
+        <div>
+          <label className="text-xs font-semibold">Comment:</label>
+          <textarea
+            className="mt-1 w-full border rounded p-1 text-xs"
+            rows={3}
+            placeholder="Your comment..."
+            value={feedback.comment}
+            onChange={(e) => updateFeedback({ comment: e.target.value })}
+          />
         </div>
 
         {/* Legend */}
@@ -170,54 +487,112 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
         </div>
 
         {/* Analysis Details */}
-        {showDetails && analysis && (
-          <div className="grid grid-cols-2 gap-4 text-sm">
+        {showDetails && localAnalysis && (
+          <div className="grid grid-cols-1 gap-4 text-sm">
             <div>
-              <h4 className="font-medium mb-2">Path Analysis</h4>
+              <h4 className="font-medium mb-2 flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-green-500" />
+                Cost Analysis
+              </h4>
               <div className="space-y-1">
-                {analysis.path_info.path_tiles.map((tileCount, index) => (
-                    <div className="flex justify-between" key={`path-tiles-${index}`}>
-                        <span>Path {index + 1}:</span>
-                        <span>{tileCount} tiles</span>
-                    </div>
-                ))}
-                {analysis.path_info.bridge_tiles > 0 && (
-                  <div className="flex justify-between">
-                    <span>Bridge:</span>
-                    <span>{analysis.path_info.bridge_tiles} tiles</span>
+                <div className="flex justify-between font-semibold">
+                  <span
+                    className="cursor-pointer hover:underline"
+                    onClick={() => setSelectedPathIndex(null)}
+                  >
+                    Total Strategic Paths:
+                  </span>
+                  <span>{localAnalysis.all_paths?.length || localAnalysis.path_costs.length}</span>
+                </div>
+                <div className="font-medium text-xs text-muted-foreground">Optimal Path Costs:</div>
+                <ScrollArea className="h-24 pr-3 border rounded-md">
+                  <div className="space-y-1 p-2">
+                    {localAnalysis.path_costs.map((cost, index) => (
+                        <div 
+                          className={`flex justify-between text-xs cursor-pointer p-1 rounded hover:bg-slate-100 ${selectedPathIndex === index ? 'bg-blue-100' : ''}`} 
+                          key={`path-cost-${index}`}
+                          onClick={() => setSelectedPathIndex(index)}
+                        >
+                            <span>Path {index + 1} Cost:</span>
+                            <span>{cost}</span>
+                        </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+                {selectedPathIndex !== null && (
+                  <div className="flex gap-2 pt-2">
+                    <Button size="sm" variant="outline" onClick={() => adjustPathLevels(1)}>Raise +1</Button>
+                    <Button size="sm" variant="outline" onClick={() => adjustPathLevels(-1)}>Lower -1</Button>
+                    <Button size="sm" variant="outline" onClick={balancePathToAverage}>Balance to Avg</Button>
+                    <Button size="sm" variant="secondary" onClick={() => {
+                      if (selectedPathIndex === null) return;
+                      const path = localAnalysis?.all_paths?.[selectedPathIndex];
+                      if (!path || !path.path) return;
+
+                      const stepCost = (level) => Math.pow(2, level - 1);
+
+                      const newTiles = localLayout.tiles.map(t => ({ ...t }));
+
+                      // Build working array of tile references for quicker cost update
+                      const pathTileRefs = path.path.map(coord => {
+                        const [r, c] = coord.split(',').map(Number);
+                        return newTiles.find(t => t.row === r + 1 && t.col === c + 1);
+                      }).filter(Boolean);
+
+                      const otherCosts = localAnalysis.path_costs.filter((_, idx) => idx !== selectedPathIndex);
+
+                      let currentCost = localAnalysis.path_costs[selectedPathIndex];
+                      let targetMax = ((otherCosts.length? (otherCosts.reduce((a,b)=>a+b,0)+currentCost)/(otherCosts.length+1):currentCost) *1.15);
+
+                      // Lower levels starting from highest until under threshold
+                      while (currentCost > targetMax) {
+                        let changed = false;
+                        // sort by level desc each loop to always lower highest first
+                        pathTileRefs.sort((a,b)=> (b.required_item_level||0)-(a.required_item_level||0));
+                        for(const tile of pathTileRefs){
+                          if(tile.required_item_level>1){
+                            tile.required_item_level -=1;
+                            const parts = tile.required_item_name.split(' L');
+                            tile.required_item_name = `${parts[0]} L${tile.required_item_level}`;
+                            currentCost -= stepCost(tile.required_item_level+1) - stepCost(tile.required_item_level);
+                            changed = true;
+                            if(currentCost <= targetMax) break;
+                          }
+                        }
+                        if(!changed) break; // cannot lower further
+                      }
+
+                      // Recompute average with new cost
+                      const newCosts = [...localAnalysis.path_costs];
+                      newCosts[selectedPathIndex] = Math.ceil(currentCost);
+                      const newAnalysis = { ...localAnalysis, path_costs: newCosts };
+                      if(newAnalysis.all_paths && newAnalysis.all_paths[selectedPathIndex]){
+                         newAnalysis.all_paths = [...newAnalysis.all_paths];
+                         newAnalysis.all_paths[selectedPathIndex] = { ...newAnalysis.all_paths[selectedPathIndex], cost: Math.ceil(currentCost) };
+                      }
+
+                      setLocalLayout({ ...localLayout, tiles: newTiles });
+                      setLocalAnalysis(newAnalysis);
+                    }}>
+                      Balance ≤15%
+                    </Button>
                   </div>
                 )}
-                <div className="flex justify-between font-semibold">
-                  <span>Total:</span>
-                  <span>{analysis.total_path_tiles} tiles</span>
-                </div>
-              </div>
-            </div>
-            
-            <div>
-              <h4 className="font-medium mb-2">Cost Analysis</h4>
-              <div className="space-y-1">
-                {analysis.path_costs.map((cost, index) => (
-                    <div className="flex justify-between" key={`path-cost-${index}`}>
-                        <span>Path {index + 1} Cost:</span>
-                        <span>{cost}</span>
-                    </div>
-                ))}
-                <div className="flex justify-between text-muted-foreground">
+                <div className="flex justify-between text-muted-foreground pt-2">
                   <span>Cost Variance:</span>
-                  <span>{analysis.cost_variance.toFixed(1)}</span>
+                  <span>{localAnalysis.cost_variance.toFixed(1)}</span>
                 </div>
                  <div className="flex justify-between font-semibold">
                     <span>Shortest Path:</span>
-                    <span>{analysis.shortest_path}</span>
+                    <span>{localAnalysis.shortest_path}</span>
                 </div>
                 <div className="flex justify-between font-semibold">
                     <span>Longest Path:</span>
-                    <span>{analysis.longest_path}</span>
+                    <span>{localAnalysis.longest_path}</span>
                 </div>
                 <div className="flex justify-between">
                   <span>Average Path:</span>
-                  <span>{analysis.average_path.toFixed(1)}</span>
+                  <span>{localAnalysis.average_path.toFixed(1)}</span>
                 </div>
               </div>
             </div>
@@ -227,19 +602,19 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
               <div className="grid grid-cols-3 gap-4">
                 <div className="text-center">
                   <div className="text-lg font-bold text-green-600">
-                    {analysis.balance_score?.toFixed(1) || 'N/A'}
+                    {localAnalysis.balance_score?.toFixed(1) || 'N/A'}
                   </div>
                   <div className="text-xs text-muted-foreground">Balance</div>
                 </div>
                 <div className="text-center">
                   <div className="text-lg font-bold text-blue-600">
-                    {analysis.complexity_score?.toFixed(1) || 'N/A'}
+                    {localAnalysis.complexity_score?.toFixed(1) || 'N/A'}
                   </div>
                   <div className="text-xs text-muted-foreground">Complexity</div>
                 </div>
                 <div className="text-center">
                   <div className="text-lg font-bold text-purple-600">
-                    {analysis.strategic_variance?.toFixed(1) || 'N/A'}
+                    {localAnalysis.strategic_variance?.toFixed(1) || 'N/A'}
                   </div>
                   <div className="text-xs text-muted-foreground">Strategic</div>
                 </div>

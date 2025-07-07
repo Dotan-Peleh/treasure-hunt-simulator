@@ -47,6 +47,7 @@ export default function LayoutGeneratorSimulator() {
     milestoneCount: 3, 
     pathCount: 2,
     freeTileCount: 10,
+    pathPattern: 'random', // 'random', 'vertical', 's_curve', 'y_junction'
   });
   
   const [filters, setFilters] = useState({
@@ -102,7 +103,18 @@ export default function LayoutGeneratorSimulator() {
     
     try {
       const result = generateBoardLayout(layoutConfig);
-      
+
+      // Entry point validation: ensure entry points are not too high on the board.
+      // "Max line 3" from the bottom corresponds to tile.row >= 7.
+      const entryPoints = result.tiles.filter(t => t.isEntryPoint);
+      for (const entry of entryPoints) {
+        if (entry.row < 8) {
+          return null; // Discard layout if an entry point is higher than row 8 (max line 2).
+        }
+      }
+
+      // The 15% cost deviation rule has been removed. All layouts will be kept.
+
       return {
         id: layoutId,
         name: name,
@@ -123,6 +135,10 @@ export default function LayoutGeneratorSimulator() {
 
   const generateLayouts = async () => {
     setIsGenerating(true);
+    // Reset any prior per-layout feedback so the next batch starts clean
+    try {
+      localStorage.removeItem('layoutFeedback');
+    } catch {/* ignore */}
     setGenerationProgress(0);
     setGeneratedLayouts([]);
     setCurrentAnalysis(null);
@@ -191,21 +207,14 @@ export default function LayoutGeneratorSimulator() {
   // New function to generate milestones dynamically based on count.
   const generateDynamicMilestones = (count) => {
     if (count === 0) return [];
-    
-    const milestones = [];
-    const baseReward = 25;
-    const rewardIncrement = 15;
-    
-    // Rows are distributed from bottom to top, with the first milestone being the easiest.
-    const rowPositions = [7, 5, 3]; 
-
-    for (let i = 0; i < count; i++) {
-        milestones.push({
-            row: rowPositions[i],
-            reward: baseReward + (i * rewardIncrement)
-        });
+    const rewards = [];
+    while (rewards.length < count) {
+      const rand = Math.floor(25 + Math.random() * 36); // 25-60 inclusive
+      if (!rewards.includes(rand)) rewards.push(rand);
     }
-    return milestones;
+    rewards.sort((a, b) => a - b); // ensure ascending
+    const rowPositions = [7, 5, 3]; // bottom to top
+    return rewards.map((reward, idx) => ({ row: rowPositions[idx], reward }));
   };
 
   const calculateBalanceScore = (analysis) => {
@@ -219,8 +228,8 @@ export default function LayoutGeneratorSimulator() {
         const maxLength = Math.max(...pathLengths);
         if (maxLength > 0) {
             const pathRatio = minLength / maxLength;
-            const pathBalanceBonus = pathRatio * 10;
-            score += pathBalanceBonus;
+    const pathBalanceBonus = pathRatio * 10;
+    score += pathBalanceBonus;
         }
     }
     
@@ -310,10 +319,35 @@ export default function LayoutGeneratorSimulator() {
     URL.revokeObjectURL(url);
   };
 
+  const exportPageFeedback = () => {
+    let feedback = {};
+    try {
+      feedback = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
+    } catch { feedback = {}; }
+    const layoutsWithFeedback = paginatedLayouts.map(l => ({
+        ...l,
+        feedback: feedback[l.id] || null
+    }));
+    const data = {
+      exported_at: new Date().toISOString(),
+      layouts: layoutsWithFeedback
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `page-feedback-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleClearLayouts = () => {
     setGeneratedLayouts([]);
     setCurrentAnalysis(null);
     setPreviewPage(0);
+    try {
+      localStorage.removeItem('layoutFeedback');
+    } catch {/* ignore */}
   };
 
   const filteredLayouts = getFilteredAndSortedLayouts();
@@ -365,6 +399,10 @@ export default function LayoutGeneratorSimulator() {
             <Download className="w-4 h-4" />
             Export
           </Button>
+          <Button onClick={exportPageFeedback} disabled={paginatedLayouts.length === 0} variant="secondary" className="flex items-center gap-2" title="Export feedback for layouts on this page">
+            <Download className="w-4 h-4" />
+            Export Page Feedback
+          </Button>
         </div>
       </div>
 
@@ -413,6 +451,23 @@ export default function LayoutGeneratorSimulator() {
                   </select>
                   <p className="text-xs text-muted-foreground mt-1">
                     Select the type of layouts you want to generate.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium">Path Pattern</label>
+                  <select
+                    value={generationConfig.pathPattern}
+                    onChange={(e) => setGenerationConfig(prev => ({ ...prev, pathPattern: e.target.value }))}
+                    className="w-full mt-1 px-3 py-2 border rounded-md"
+                  >
+                    <option value="random">Random (Zig-Zag)</option>
+                    <option value="vertical_lanes">Vertical Lanes</option>
+                    <option value="s_curves">Mirrored S-Curves</option>
+                    <option value="y_junction">Y-Junction</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Choose a specific path shape or randomize.
                   </p>
                 </div>
 
@@ -520,7 +575,7 @@ export default function LayoutGeneratorSimulator() {
                             Total Free Tiles: 6 (start) + {generationConfig.freeTileCount} (extra) = {6 + generationConfig.freeTileCount}
                         </p>
                     </div>
-                </CardContent>
+              </CardContent>
             </Card>
 
             <Card>
@@ -766,7 +821,7 @@ export default function LayoutGeneratorSimulator() {
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold">Layout Visualizations</h3>
                 <div className="flex items-center gap-4">
-                    <p className="text-sm text-muted-foreground">
+                <p className="text-sm text-muted-foreground">
                         Page {previewPage + 1} of {totalPreviewPages}
                     </p>
                     <div className="flex items-center gap-2">
@@ -790,12 +845,18 @@ export default function LayoutGeneratorSimulator() {
               
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {paginatedLayouts.map((layout, index) => (
+                  layout.analysis ? (
                   <LayoutPreview
                     key={`${layout.id}-${index}`}
                     layout={layout}
                     analysis={layout.analysis}
                     showDetails={true}
                   />
+                  ) : (
+                    <div key={`${layout.id}-${index}`} className="text-red-500 p-4 border rounded-md">
+                      Error: Missing analysis for layout {layout.name || layout.id}
+                    </div>
+                  )
                 ))}
               </div>
               

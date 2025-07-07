@@ -61,11 +61,100 @@ The heart of the project is the procedural layout generator. Here are the key ru
    cd base44
    ```
 2. Install dependencies:
-   ```bash
-   npm install
+```bash
+npm install
    ```
 3. Run the development server:
    ```bash
-   npm run dev
-   ```
+npm run dev
+```
 The application will be available at `http://localhost:5173` (or the next available port).
+
+# Full Product Requirements Document (PRD)
+
+*(The following expands on the quick overview above and documents the entire system end-to-end.)*
+
+## 1. Vision
+Design a deterministic yet highly-configurable engine that:
+1. Procedurally generates board layouts for a merge-puzzle / live-ops event.
+2. Guarantees fairness and solvability while allowing “just-right” strategic variance.
+3. Provides rich simulation & analysis tools so game-designers can evaluate thousands of candidate boards in minutes, iterate, and ship balanced content.
+
+## 2. Core Concepts
+| Term | Meaning |
+|------|---------|
+| **Tile** | Cell on a 9 × 7 grid (`row` 1-9 bottom→top, `col` 1-7 left→right). |
+| **Tile Types** | `start`, `free`, `semi_locked`, `locked`, `rock`, `bridge`, `key`, `generator_mixed`, `generator_green`. |
+| **Entry Point** | First discoverable tile of a path (must live in rows 7-9). |
+| **Path** | Contiguous chain of `semi_locked` tiles leading from an entry point to the key. |
+| **Bridge** | Neutral connector auto-inserted by the BFS repair pass. |
+| **Item Chains** | Three colored item progressions (orange = Energy Cell, blue = Data Chip, green = Bio Fuel). |
+| **Milestones** | Reward thresholds at rows 7, 5, 3 granting +25-60 soft currency. |
+
+## 3. High-Level Flow
+```
+LayoutGeneratorSimulator
+└─ generateSingleLayout()
+   ├─ setupGrid()                  – basic grid / start area / key
+   ├─ LayoutManager.generateLayout – draw N “rough” paths
+   ├─ validateAndRepairLayout()    – BFS reachability + bridge repair
+   ├─ placeGeneratorsAndFrees()    – start generators + random frees
+   ├─ assignProgressionCosts()     – progressive difficulty per path
+   ├─ flagEntryPoints()            – choose bottom-most tile of each path
+   ├─ findAllPathsFromEntries()    – Dijkstra shortest path per entry
+   └─ buildAnalysis()              – variance, scores, meta-stats
+```
+
+## 4. Game-Design Rules
+| # | Rule | Enforcement |
+|---|------|-------------|
+| 1 | Exactly one **key** in the top row, cols 2-6. | `setupGrid` randomises the key after nuking rogues. |
+| 2 | Fixed 3×2 **start area** at bottom-left. | `setupGrid`. |
+| 3 | **Entry points** must start on rows 7-9. | Discard layout in `LayoutGeneratorSimulator` if any `entry.row < 7`. |
+| 4 | All key & path tiles must be reachable. | `validateAndRepairLayout` BFS + bridge repair. |
+| 5 | Progressive costs (Levels 2-7) bottom→top. | `assignProgressionCosts`. |
+| 6 | Cost variance ≤ 15 % of mean. | Post-gen rule in simulator. |
+| 7 | Two generators fixed in start area. | `placeGeneratorsAndFrees`. |
+| 8 | Extra free tiles (slider 5-15). | Same helper. |
+| 9 | Milestone rows fixed, rewards random 25-60. | `generateDynamicMilestones`. |
+
+## 5. Algorithms
+### 5.1 Path Drawing
+Lightweight Manhattan walk with randomised decisions – avoids uniform corridors.
+
+### 5.2 Reachability Repair
+1. BFS from all start tiles.  2. Convert adjacent blocking rocks into `bridge`.  3. Repeat until all important cells reachable.
+
+### 5.3 Cost Assignment
+* First 30 % of each path → Levels 2-3.
+* Middle 40 % → Levels 3-5.
+* Final 30 % → Levels 4-7.
+* Cost per tile = 2^(level-1).
+
+### 5.4 Shortest-Path Discovery
+Pure Dijkstra, one optimal path per entry.  (Redundant greedy walk removed.)
+
+## 6. Scoring Metrics
+| Metric | Formula |
+|---------|---------|
+| `cost_variance` | max(path_cost) − min(path_cost) |
+| `balance_score` | 100 − min(30, variance/10) + (min_len/max_len)*10 |
+| `complexity_score` | min(total_tiles/2,30)+20*(has_connection)+min(bridge*3,25)+min(var/5,25) |
+| `strategic_variance` | ((max_len − min_len)/total_tiles)*100 |
+
+## 7. UI Modules
+* **LayoutPreview** – static cards + feedback persistence.
+* **InteractiveBoard** – live board with fog-of-war & milestone overlays.
+* **LayoutGeneratorSimulator** – batch generator, filters, JSON export.
+
+## 8. Persistence & Export
+Local Storage keys: `generatedLayouts`, `layoutFeedback`.
+Exports: human-readable JSON snapshots for batch or per-layout.
+
+## 9. Public Data Contracts
+(TypeScript-style interfaces omitted here for brevity; see source.)
+
+## 10. Roadmap
+1. Module split (in-progress). 2. AI play-test bots. 3. CMS pipeline. 4. Designer tweak UI. 5. Localization.
+
+*(End of PRD)*

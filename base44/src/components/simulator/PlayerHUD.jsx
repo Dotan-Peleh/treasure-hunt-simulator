@@ -1,9 +1,9 @@
 
-import React from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
 import { Zap, Target, TrendingUp, TrendingDown, Route, HelpCircle } from 'lucide-react';
+import PropTypes from 'prop-types';
 
 export default function PlayerHUD({ playerState, progressData, pathAnalysis, onHintClick, hintActive }) {
   const progressPercentage = progressData?.completion_percentage || 0;
@@ -46,21 +46,21 @@ export default function PlayerHUD({ playerState, progressData, pathAnalysis, onH
                 <TrendingDown className="w-4 h-4 text-green-600" />
                 <div>
                   <div className="font-bold">Easiest Path</div>
-                  <div className="text-slate-600">{pathAnalysis.shortest_path} energy</div>
+                  <div className="text-slate-600">{pathAnalysis.shortest_path.toFixed(0)} energy</div>
                 </div>
               </div>
               <div className="flex items-center gap-2 p-2 bg-slate-100 rounded-md">
                 <Route className="w-4 h-4 text-blue-600" />
                 <div>
                   <div className="font-bold">Average Path</div>
-                  <div className="text-slate-600">{pathAnalysis.average_path} energy</div>
+                  <div className="text-slate-600">{pathAnalysis.average_path.toFixed(0)} energy</div>
                 </div>
               </div>
               <div className="flex items-center gap-2 p-2 bg-slate-100 rounded-md">
                 <TrendingUp className="w-4 h-4 text-red-600" />
                 <div>
                   <div className="font-bold">Hardest Path</div>
-                  <div className="text-slate-600">{pathAnalysis.longest_path} energy</div>
+                  <div className="text-slate-600">{pathAnalysis.longest_path.toFixed(0)} energy</div>
                 </div>
               </div>
             </div>
@@ -73,3 +73,19 @@ export default function PlayerHUD({ playerState, progressData, pathAnalysis, onH
     </div>
   );
 }
+
+PlayerHUD.propTypes = {
+  playerState: PropTypes.shape({
+    credits: PropTypes.number.isRequired,
+  }).isRequired,
+  progressData: PropTypes.shape({
+    completion_percentage: PropTypes.number,
+  }),
+  pathAnalysis: PropTypes.shape({
+    shortest_path: PropTypes.number,
+    average_path: PropTypes.number,
+    longest_path: PropTypes.number,
+  }),
+  onHintClick: PropTypes.func.isRequired,
+  hintActive: PropTypes.bool.isRequired,
+};

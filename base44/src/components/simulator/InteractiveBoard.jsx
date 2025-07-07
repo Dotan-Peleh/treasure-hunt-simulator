@@ -2,7 +2,7 @@
 import { Badge } from '@/components/ui/badge';
 import PropTypes from 'prop-types';
 import {
-  Lock, Gem, Zap, HelpCircle, Mountain,
+  Lock, Gem, Zap, HelpCircle, Mountain, Flag,
   Circle, Square, Triangle, Shield, Star, Hexagon, Crown, Key
 } from 'lucide-react';
 
@@ -73,6 +73,11 @@ export default function InteractiveBoard({
           <div className={`relative w-full h-full ${generatorClass} rounded-full flex items-center justify-center shadow-md`}>
             <Zap className="w-5 h-5 md:w-6 md:h-6 text-white" />
           </div>
+          {item.isStart && (
+            <div className="absolute -top-1 -right-1 bg-white p-0.5 rounded-full shadow-lg">
+              <Flag className="w-3 h-3 text-red-500" />
+            </div>
+          )}
         </div>
       );
     }
@@ -182,6 +187,13 @@ export default function InteractiveBoard({
                     </div>
                   )}
 
+                  {/* Entry-point flag overlay */}
+                  {tile.isEntryPoint && (
+                      <div className="absolute -top-1 -left-1 bg-white rounded-full p-0.5 shadow">
+                          <Flag className="w-3 h-3 text-red-500" />
+                      </div>
+                  )}
+                  
                   {/* Fallback for a standard locked tile (not in layout view) */}
                   {tile.tile_type === 'locked' && !showRequirement && !tile.item && <Lock className="w-5 h-5 text-slate-400" />}
                   

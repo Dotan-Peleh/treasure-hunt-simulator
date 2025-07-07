@@ -1,4 +1,6 @@
 import { LayoutManager } from './LayoutManager';
+import { validateAndRepairLayout } from '@/generation/validation';
+import { findAllPathsFromEntries } from '@/generation/pathAnalysis';
 
 const createTile = (row, col, tileType, unlocked = false, item = null, required_item = null) => {
     const tile = {
@@ -33,100 +35,7 @@ const calculateStepCost = (level) => {
     return Math.pow(2, level - 1);
 };
 
-// Validates that all path and key tiles are reachable from the start area.
-// If not, it attempts to repair the layout by converting blocking rocks into path tiles.
-const validateAndRepairLayout = (grid) => {
-    const rows = grid.length;
-    const cols = grid[0].length;
-    const visited = new Set();
-    const queue = [];
-
-    // 1. Find all start tiles and add them to the queue
-    for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-            if (grid[r][c] === 'start') {
-                const key = `${r},${c}`;
-                if (!visited.has(key)) {
-                    visited.add(key);
-                    queue.push({ r, c });
-                }
-            }
-        }
-    }
-
-    // 2. Perform BFS to find all reachable tiles
-    let head = 0;
-    while (head < queue.length) {
-        const { r, c } = queue[head++];
-        const neighbors = [
-            { r: r - 1, c: c }, { r: r + 1, c: c },
-            { r: r, c: c - 1 }, { r: r, c: c + 1 }
-        ];
-
-        for (const neighbor of neighbors) {
-            const { r: nr, c: nc } = neighbor;
-            if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
-                const key = `${nr},${nc}`;
-                // We can traverse any tile that is NOT a rock.
-                if (grid[nr][nc] !== 'rock' && !visited.has(key)) {
-                    visited.add(key);
-                    queue.push({ r: nr, c: nc });
-                }
-            }
-        }
-    }
-
-    // 3. Identify all unreachable but important tiles (paths and key)
-    const unreachableImportantTiles = [];
-    for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-            const key = `${r},${c}`;
-            const cellType = grid[r][c];
-            if ((cellType.startsWith('path') || cellType === 'key' || cellType === 'bridge') && !visited.has(key)) {
-                unreachableImportantTiles.push({ r, c });
-            }
-        }
-    }
-
-    // 4. Repair the grid by converting blocking rocks into path tiles
-    if (unreachableImportantTiles.length > 0) {
-        console.warn(`Repairing layout: Found ${unreachableImportantTiles.length} unreachable important tiles.`);
-        for (const tile of unreachableImportantTiles) {
-            // Find the nearest rock separating this tile from the visited area
-            // This is a simplified heuristic: find an adjacent rock that has a visited neighbor.
-            const neighbors = [
-                { r: tile.r - 1, c: tile.c }, { r: tile.r + 1, c: tile.c },
-                { r: tile.r, c: tile.c - 1 }, { r: tile.r, c: tile.c + 1 }
-            ];
-            let repaired = false;
-            for (const neighbor of neighbors) {
-                const { r: nr, c: nc } = neighbor;
-                if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && grid[nr][nc] === 'rock') {
-                    // Is this rock adjacent to the main visited area?
-                    const rockNeighbors = [
-                        { r: nr - 1, c: nc }, { r: nr + 1, c: nc },
-                        { r: nr, c: nc - 1 }, { r: nr, c: nc + 1 }
-                    ];
-                    for (const rn of rockNeighbors) {
-                        if (visited.has(`${rn.r},${rn.c}`)) {
-                            // This rock is a bridge. Convert it.
-                            // We'll make it a 'bridge' tile as a neutral connector.
-                            grid[nr][nc] = 'bridge'; 
-                            console.log(`Repaired by converting rock at (${nr},${nc}) to a bridge.`);
-                            repaired = true;
-                            break;
-                        }
-                    }
-                }
-                if (repaired) break;
-            }
-        }
-        // After repairs, we need to re-run the validation to connect the new bridge.
-        return validateAndRepairLayout(grid);
-    }
-    
-    return grid; // Return the validated (and possibly repaired) grid
-};
+// (helpers now imported)
 
 export const generateBoardLayout = (config) => {
     const { item_chains = [], milestones, customGrid, pathCount = 2, freeTileCount = 10 } = config; 
@@ -165,7 +74,7 @@ export const generateBoardLayout = (config) => {
     // Variations from customGrid have their paths already.
     if (!customGrid) {
         const layoutManager = new LayoutManager(grid, keyPos);
-        grid = layoutManager.generateLayout(pathCount);
+        grid = layoutManager.generateLayout(pathCount, config.pathPattern);
     }
     
     // 5. Run accessibility validation AFTER the start area and key have been defined
@@ -209,8 +118,6 @@ export const generateBoardLayout = (config) => {
     const blueChain = item_chains.find(c => c.color === 'blue') || { chain_name: 'Data Chip', levels: 8, color: 'blue' };
     const greenChain = item_chains.find(c => c.color === 'green') || { chain_name: 'Bio Fuel', levels: 10, color: 'green' };
     
-    let bridgeCost = 0;
-    
     // Collect all path tiles together for processing
     const pathTiles = [];
     for (let i = 1; i <= pathCount; i++) {
@@ -244,10 +151,10 @@ export const generateBoardLayout = (config) => {
                 tile = createTile(r + 1, c + 1, 'free', true);
                 tile.discovered = true;
             } else if (cellType === 'generator_mixed') {
-                tile = createTile(r + 1, c + 1, 'free', true, { type: 'generator', chains: [blueChain, orangeChain] });
+                tile = createTile(r + 1, c + 1, 'free', true, { type: 'generator', chains: [blueChain, orangeChain], isStart: true });
                 tile.discovered = true;
             } else if (cellType === 'generator_green') {
-                tile = createTile(r + 1, c + 1, 'free', true, { type: 'generator', chains: [greenChain] });
+                tile = createTile(r + 1, c + 1, 'free', true, { type: 'generator', chains: [greenChain], isStart: true });
                 tile.discovered = true;
             } else if (cellType === 'key') {
                 tile = createTile(r + 1, c + 1, 'key', false, null, null);
@@ -275,6 +182,8 @@ export const generateBoardLayout = (config) => {
         // Middle tiles: Level 2-4 (moderate) 
         // Top tiles (near key): Level 3-6 (harder)
         
+        let prevLevel = 2;
+
         sortedTiles.forEach((pathTile, index) => {
             // Randomly select a chain for each tile to improve variance
             const selectedChain = allChains[Math.floor(Math.random() * allChains.length)];
@@ -293,11 +202,16 @@ export const generateBoardLayout = (config) => {
                 // Final 30% of path: Levels 4-7 (significant challenge)
                 level = Math.floor(Math.random() * 4) + 4; // 4, 5, 6, or 7
             }
-            
+
+            // Ensure level does not decrease compared to previous tile
+            level = Math.max(level, prevLevel);
+
             // Ensure level doesn't exceed chain maximum
             level = Math.min(level, selectedChain.levels - 1);
             // Ensure level is at least 2
             level = Math.max(level, 2);
+
+            prevLevel = level;
             
             currentPathTotalCost += calculateStepCost(level);
             
@@ -311,39 +225,66 @@ export const generateBoardLayout = (config) => {
         return currentPathTotalCost;
     };
     
-    const pathCosts = pathTiles.map(path => createBalancedProgression(path, tiles));
-    bridgeCost = createBalancedProgression(bridgeTiles, tiles);
+    const nonEmptyPaths = pathTiles.filter(p => p.length > 0);
 
-    // Discover the start of each path so the player knows where to go.
-    pathTiles.forEach(path => {
+    nonEmptyPaths.forEach(path => createBalancedProgression(path, tiles));
+    createBalancedProgression(bridgeTiles, tiles);
+
+    // Determine and flag the true entry tile for each path: the tile farthest from the key (bottom-/left-/right-most depending on path shape).
+    const usedEntryColumns = new Set();
+    nonEmptyPaths.forEach(path => {
         if (path.length === 0) return;
 
-        // The start of a path is the tile with the highest row number (closest to the bottom).
-        const pathStartTile = path.reduce((prev, curr) => (prev.r > curr.r ? prev : curr));
+        // Choose the entry tile (bottom-most, tie-breakers by path side)
+        const maxRow = Math.max(...path.map(t => t.r));
+        const bottomTiles = path.filter(t => t.r === maxRow);
+        let entry;
+        if (bottomTiles.length === 1) {
+            entry = bottomTiles[0];
+        } else {
+            const avgCol = path.reduce((sum, t) => sum + t.c, 0) / path.length;
+            if (avgCol <= (cols - 1) / 2) {
+                entry = bottomTiles.reduce((prev, curr) => (curr.c < prev.c ? curr : prev));
+            } else {
+                entry = bottomTiles.reduce((prev, curr) => (curr.c > prev.c ? curr : prev));
+            }
+        }
 
-        // Find this tile in the main `tiles` array and set it to discovered.
-        const tileToDiscover = tiles.find(t => t.row === pathStartTile.r + 1 && t.col === pathStartTile.c + 1);
-        if (tileToDiscover) {
-            tileToDiscover.discovered = true;
+        // Enforce unique column per entry flag to avoid stacked flags.
+        if (usedEntryColumns.has(entry.c)) return;
+        usedEntryColumns.add(entry.c);
+
+        const tileInBoard = tiles.find(t => t.row === entry.r + 1 && t.col === entry.c + 1);
+        if (tileInBoard) {
+            tileInBoard.discovered = true;
+            tileInBoard.isEntryPoint = true;
         }
     });
 
-    const effectivePathCosts = pathCosts.map(c => c + bridgeCost);
-    const totalPathTiles = pathTiles.reduce((sum, path) => sum + path.length, 0) + bridgeTiles.length;
+    const totalPathTiles = nonEmptyPaths.reduce((sum, path) => sum + path.length, 0) + bridgeTiles.length;
     
+    const { all_paths } = findAllPathsFromEntries(grid, tiles);
+    const reachableEntries = new Set(all_paths.map(p => p.path[0]));
+    tiles.forEach(t => {
+        if (t.isEntryPoint && !reachableEntries.has(`${t.row-1},${t.col-1}`)) {
+            t.isEntryPoint = false; // Change to false instead of deleting
+        }
+    });
+    const pathCosts = all_paths.map(p => p.cost);
+
     const analysis = {
-        path_costs: effectivePathCosts.map(cost => Math.ceil(cost)),
-        bridge_cost: Math.ceil(bridgeCost),
-        cost_variance: effectivePathCosts.length > 1 ? Math.abs(Math.max(...effectivePathCosts) - Math.min(...effectivePathCosts)) : 0,
-        shortest_path: effectivePathCosts.length > 0 ? Math.ceil(Math.min(...effectivePathCosts)) : 0,
-        longest_path: effectivePathCosts.length > 0 ? Math.ceil(Math.max(...effectivePathCosts)) : 0,
-        average_path: effectivePathCosts.length > 0 ? effectivePathCosts.reduce((a, b) => a + b, 0) / effectivePathCosts.length : 0,
+        path_costs: pathCosts.map(cost => Math.ceil(cost)),
+        cost_variance: pathCosts.length > 1 ? Math.abs(Math.max(...pathCosts) - Math.min(...pathCosts)) : 0,
+        shortest_path: pathCosts.length > 0 ? Math.ceil(Math.min(...pathCosts)) : 0,
+        longest_path: pathCosts.length > 0 ? Math.ceil(Math.max(...pathCosts)) : 0,
+        average_path: pathCosts.length > 0 ? pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length : 0,
+        all_paths: all_paths,
         key_cost: 0,
         milestones: milestones,
         total_path_tiles: totalPathTiles,
         path_info: {
-            path_count: pathCount,
-            path_tiles: pathTiles.map(p => p.length),
+            path_count: all_paths.length,
+            path_tiles: nonEmptyPaths.map(p => p.length),
             bridge_tiles: bridgeTiles.length,
             has_connection: bridgeTiles.length > 0
         }
