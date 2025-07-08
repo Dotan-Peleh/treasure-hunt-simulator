@@ -5,7 +5,6 @@ import PropTypes from 'prop-types';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useState, useMemo, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { findAllPathsFromEntries } from '@/generation/pathAnalysis';
 
 export default function LayoutPreview({ layout, analysis, showDetails = true, compact = false }) {
   // Local mutable copies so we can tweak levels without touching parent data
@@ -18,36 +17,6 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
     setLocalAnalysis(analysis);
     setSelectedPathIndex(null);
   }, [layout, analysis]);
-
-  // NEW: A stable string representing all current entry points.
-  // This is a reliable dependency for the analysis effect hook.
-  const entryPointsKey = useMemo(() => {
-    if (!localLayout?.tiles) return '';
-    return localLayout.tiles
-      .filter(t => t.isEntryPoint)
-      .map(t => `${t.row},${t.col}`)
-      .sort()
-      .join(';');
-  }, [localLayout]);
-
-  // NEW: A stable string representing all PASSABLE tiles.
-  // When a tile turns into a rock, this key changes, triggering re-analysis.
-  const passableTilesKey = useMemo(() => {
-    if (!localLayout?.tiles) return '';
-    return localLayout.tiles
-      .filter(t => t.tile_type === 'semi_locked' || t.tile_type === 'bridge' || t.tile_type === 'key')
-      .map(t => `${t.row},${t.col}`)
-      .sort()
-      .join(';');
-  }, [localLayout]);
-
-  // NEW: Re-run the full analysis anytime the entry points OR passable tiles change.
-  useEffect(() => {
-    // Guard against running on initial empty state before layout is set.
-    if (!localLayout.id) return; 
-
-    rebuildAnalysisFromTiles();
-  }, [entryPointsKey, passableTilesKey, localLayout.id]); // Add passableTilesKey and localLayout.id
 
   const [selectedPathIndex, setSelectedPathIndex] = useState(null);
   // Local feedback state: { label: "good"|"bad"|null, comment: string, entryOverride: "r,c"|null }
@@ -148,7 +117,6 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
     const path = localAnalysis.all_paths[selectedPathIndex];
     if (!path || !path.path) return;
     
-    // Use a fresh copy of tiles to mutate
     const newTiles = localLayout.tiles.map(t => ({...t}));
     const pathTileRefs = path.path.map(coord => {
         const [r, c] = coord.split(',').map(Number);
@@ -157,67 +125,29 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
 
     if (pathTileRefs.length === 0) return;
 
-    const stepCost = (level) => Math.pow(2, level - 1);
-    const chainMaxMap = { orange: 12, blue: 8, green: 10 };
+    const stepCost = (level) => Math.pow(2, level-1);
     let iterations = 0;
-    
-    // More sophisticated balancing loop
-    while (Math.abs(currentCost - targetCost) > 5 && iterations < 150) {
-        let tileToChange = null;
 
-        // --- Rule 1: Break up sequences of 3+ identical levels ---
-        for (let i = 0; i <= pathTileRefs.length - 3; i++) {
-            const t1 = pathTileRefs[i];
-            const t2 = pathTileRefs[i+1];
-            const t3 = pathTileRefs[i+2];
-            if (t1.required_item_level === t2.required_item_level && t2.required_item_level === t3.required_item_level) {
-                // To break the sequence, pick the middle tile to change.
-                // Change it in the direction that helps us reach the target cost.
-                tileToChange = t2;
-                break;
-            }
-        }
-
-        const costDifference = currentCost - targetCost;
-        const direction = costDifference > 0 ? -1 : 1; // -1 to lower cost, +1 to raise cost
-
-        if (tileToChange) {
-            // A sequence was found, so we prioritize changing it.
+    while (Math.abs(currentCost - targetCost) > 5 && iterations < 100) {
+        if (currentCost > targetCost) {
+            // Path is too expensive, lower the highest level
+            pathTileRefs.sort((a,b) => (b.required_item_level || 0) - (a.required_item_level || 0));
+            const tileToChange = pathTileRefs.find(t => t.required_item_level > 2);
+            if (!tileToChange) break;
+            currentCost -= stepCost(tileToChange.required_item_level) - stepCost(tileToChange.required_item_level - 1);
+            tileToChange.required_item_level--;
         } else {
-            // --- Rule 2: If no sequences, change the most impactful tile ---
-            if (direction === -1) { // Path is too expensive, lower the highest level tile
-                pathTileRefs.sort((a,b) => (b.required_item_level || 0) - (a.required_item_level || 0));
-                tileToChange = pathTileRefs.find(t => t.required_item_level > 2);
-            } else { // Path is too cheap, raise the lowest level tile
-                pathTileRefs.sort((a,b) => (a.required_item_level || 0) - (b.required_item_level || 0));
-                tileToChange = pathTileRefs.find(t => t.required_item_level < (chainMaxMap[t.required_item_chain_color] || 12) - 1);
-            }
+            // Path is too cheap, raise the lowest level
+            pathTileRefs.sort((a,b) => (a.required_item_level || 0) - (b.required_item_level || 0));
+            const tileToChange = pathTileRefs.find(t => t.required_item_level < 12);
+            if (!tileToChange) break;
+            currentCost -= stepCost(tileToChange.required_item_level) - stepCost(tileToChange.required_item_level + 1);
+            tileToChange.required_item_level++;
         }
-
-        if (!tileToChange) break; // No valid tile to change, exit loop
-
-        const oldLevel = tileToChange.required_item_level;
-        const newLevel = oldLevel + direction;
-        
-        // Clamp the new level
-        const maxLevel = (chainMaxMap[tileToChange.required_item_chain_color] || 12) - 1;
-        const clampedLevel = Math.max(2, Math.min(maxLevel, newLevel));
-        
-        if (clampedLevel === oldLevel) {
-            // This can happen if we try to raise the max level or lower the min level.
-            // To prevent an infinite loop, we'll try to find a different tile to change next iteration.
-            // For now, we just skip this iteration.
-            iterations++;
-            continue;
-        }
-
-        const costChange = stepCost(clampedLevel) - stepCost(oldLevel);
-        currentCost += costChange;
-        tileToChange.required_item_level = clampedLevel;
         iterations++;
     }
 
-    // Update names after all level changes are done
+    // Update names and analysis
     newTiles.forEach(t => {
       if(t.required_item_name) {
         const parts = t.required_item_name.split(' L');
@@ -470,38 +400,21 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
 
   // Add helper to recompute analysis completely from current tiles
   const rebuildAnalysisFromTiles = () => {
+      const { findAllPathsFromEntries } = require('@/generation/pathAnalysis');
       // rebuild grid snapshot to reflect current tiles
-      const freshGrid = Array(9).fill(null).map(() => Array(7).fill('rock'));
-      localLayout.tiles.forEach(t => {
-          if (t.row - 1 >= 0 && t.row - 1 < 9 && t.col - 1 >= 0 && t.col - 1 < 7) {
-              let type;
-              switch (t.tile_type) {
-                  case 'semi_locked':
-                      type = 'path'; // Generic path, passable
-                      break;
-                  case 'bridge':
-                      type = 'bridge'; // Passable
-                      break;
-                  case 'key':
-                      type = 'key'; // Passable, and the goal
-                      break;
-                  default:
-                      type = t.tile_type; // rock, free, start etc. (not passable)
-                      break;
-              }
-              freshGrid[t.row - 1][t.col - 1] = type;
-          }
-      });
-      // Pass the updated freshGrid to the pathfinder.
+      const freshGrid = Array(9).fill(null).map(()=>Array(7).fill(null));
+      localLayout.tiles.forEach(t=>{ if(t.row-1>=0&&t.row-1<9&&t.col-1>=0&&t.col-1<7) freshGrid[t.row-1][t.col-1]=t; });
       const { all_paths } = findAllPathsFromEntries(freshGrid, localLayout.tiles);
-      const path_costs = all_paths.map(p=>p.cost);
-      const avg = path_costs.length? path_costs.reduce((a,b)=>a+b,0)/path_costs.length:0;
-      const maxDiff = path_costs.length? Math.max(...path_costs.map(c=>Math.abs(c-avg))):0;
+      const path_costs_all = all_paths.map(p=>Math.ceil(p.cost));
+      const successful = all_paths.filter(p=>p.reachedKey!==false);
+      const successful_costs = successful.map(p=>p.cost);
+      const avg = successful_costs.length? successful_costs.reduce((a,b)=>a+b,0)/successful_costs.length:0;
+      const maxDiff = successful_costs.length? Math.max(...successful_costs.map(c=>Math.abs(c-avg))):0;
       const newAnalysis = { ...localAnalysis };
       newAnalysis.all_paths = all_paths;
-      newAnalysis.path_costs = path_costs;
-      newAnalysis.shortest_path = path_costs.length? Math.min(...path_costs):0;
-      newAnalysis.longest_path  = path_costs.length? Math.max(...path_costs):0;
+      newAnalysis.path_costs = path_costs_all;
+      newAnalysis.shortest_path = successful_costs.length? Math.min(...successful_costs):0;
+      newAnalysis.longest_path  = successful_costs.length? Math.max(...successful_costs):0;
       newAnalysis.average_path  = avg;
       newAnalysis.cost_variance = avg>0? (maxDiff/avg)*100:0;
       newAnalysis.balanced_costs = newAnalysis.cost_variance<=15;
@@ -510,61 +423,90 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
   };
 
   const addEntryAndRecalc = (coord, tileObj) => {
-      // Create a new tiles array with the target tile updated immutably.
-      const newTiles = localLayout.tiles.map(t => {
-          if (t.id !== tileObj.id) return t;
+      // If this coord already entry, skip
+      if (tileObj.isEntryPoint) return;
+      tileObj.isEntryPoint = true;
+      tileObj.discovered = true;
 
-          // Create a new object for the changed tile, only adding the entry point flag.
-          const newTile = { ...t, isEntryPoint: true, discovered: true };
-
-          // Harmonise starting difficulty
-          const existingEntryLevels = localLayout.tiles
-              .filter(et => et.isEntryPoint && et.required_item_level) // No longer excluding the current tile
-              .map(et => et.required_item_level);
-
-          if (existingEntryLevels.length > 0) {
-              const minLevel = Math.min(...existingEntryLevels);
-              let targetLevel = minLevel;
-              if (Math.random() < 0.3) targetLevel = Math.max(2, minLevel - 1);
-
-              if (!newTile.required_item_level || newTile.required_item_level > targetLevel) {
-                  newTile.required_item_level = targetLevel;
-                  if (newTile.required_item_name) {
-                      const parts = newTile.required_item_name.split(' L');
-                      newTile.required_item_name = `${parts[0]} L${targetLevel}`;
-                  }
-              }
+      // Find existing path containing coord
+      const existingPathIdx = localAnalysis.all_paths.findIndex(p => p.path.includes(coord));
+      let newPathCoords = [];
+      if (existingPathIdx !== -1) {
+        const fullPath = localAnalysis.all_paths[existingPathIdx].path;
+        const sliceStart = fullPath.indexOf(coord);
+        newPathCoords = fullPath.slice(sliceStart);
+      } else {
+        // compute via BFS over passable tiles
+        const rows = 9, cols = 7;
+        const passable = (r,cx) => {
+          const t = grid[r][cx];
+          if(!t) return false;
+          return ['semi_locked','key','free','generator_green','generator_mixed'].includes(t.tile_type);
+        };
+        const [sr,sc] = coord.split(',').map(Number);
+        let keyPos=null;
+        for(let r=0;r<rows;r++){ for(let c2=0;c2<cols;c2++){ if(grid[r][c2]?.tile_type==='key'){keyPos=[r,c2];break;} } if(keyPos) break;}
+        if(!keyPos) return;
+        const queue=[[sr,sc]];
+        const prevMap = new Map();
+        prevMap.set(`${sr},${sc}`, null);
+        const dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+        while(queue.length){
+          const [r,cx] = queue.shift();
+          if(r===keyPos[0] && cx===keyPos[1]){
+            // build path
+            const pathRev=[];
+            let cur=`${r},${cx}`;
+            while(cur){ pathRev.push(cur); cur=prevMap.get(cur);} 
+            newPathCoords=pathRev.reverse();
+            break;
           }
-          return newTile;
-      });
+          for(const [dr,dc] of dirs){
+            const nr=r+dr,nc=cx+dc;
+            if(nr<0||nr>=rows||nc<0||nc>=cols) continue;
+            if(!passable(nr,nc)) continue;
+            const key=`${nr},${nc}`;
+            if(prevMap.has(key)) continue;
+            prevMap.set(key,`${r},${cx}`);
+            queue.push([nr,nc]);
+          }
+        }
+        if(newPathCoords.length===0) return; // no path
+      }
 
-      // Set the new layout state. The useEffect will handle re-running analysis.
-      setLocalLayout(prev => ({ ...prev, tiles: newTiles }));
+      // compute cost
+      let cost = 0;
+      newPathCoords.forEach(c=>{
+        const [r,cx]=c.split(',').map(Number);
+        const t = localLayout.tiles.find(t2=>t2.row===r+1&&t2.col===cx+1);
+        if(t&&t.required_item_level) cost += stepCostGlobal(t.required_item_level);
+      });
+      const newPathObj = { path: newPathCoords, cost: Math.ceil(cost) };
+
+      const newAnalysis = { ...localAnalysis };
+      newAnalysis.all_paths = [...newAnalysis.all_paths, newPathObj];
+      newAnalysis.path_costs = [...newAnalysis.path_costs, Math.ceil(cost) ];
+
+      // recompute variance
+      const avg = newAnalysis.path_costs.reduce((a,b)=>a+b,0)/newAnalysis.path_costs.length;
+      const maxDiff = Math.max(...newAnalysis.path_costs.map(c=>Math.abs(c-avg)));
+      newAnalysis.cost_variance = avg>0 ? (maxDiff/avg)*100 : 0;
+      newAnalysis.balanced_costs = newAnalysis.cost_variance <= 15;
+      newAnalysis.shortest_path = newAnalysis.path_costs.length>0? Math.min(...newAnalysis.path_costs) : 0;
+      newAnalysis.longest_path  = newAnalysis.path_costs.length>0? Math.max(...newAnalysis.path_costs) : 0;
+      newAnalysis.average_path  = newAnalysis.path_costs.length>0? (newAnalysis.path_costs.reduce((a,b)=>a+b,0)/newAnalysis.path_costs.length) : 0;
+
+      setLocalAnalysis(newAnalysis);
+      setLocalLayout({...localLayout, tiles:[...localLayout.tiles]});
+      // pathEntryMap etc will update via memo
   };
 
-  const removeEntryAndRecalc = (coord, tileObj) => {
-      // Return early if the tile is not an entry point to prevent unnecessary re-renders.
-      if (!tileObj.isEntryPoint) return;
-      
-      const newTiles = localLayout.tiles.map(t => {
-          if (t.id === tileObj.id) {
-              return { ...t, isEntryPoint: false };
-          }
-          return t;
-      });
-      setLocalLayout(prev => ({ ...prev, tiles: newTiles }));
-  };
-
-  const placeRockAndRecalc = (tileObj) => {
-    if (tileObj.tile_type === 'rock') return;
-
-    const newTiles = localLayout.tiles.map(t => {
-      if (t.id !== tileObj.id) return t;
-      // Also turn off entry point if it was one, rock can't be an entry
-      return { ...t, tile_type: 'rock', isEntryPoint: false };
-    });
-
-    setLocalLayout(prev => ({ ...prev, tiles: newTiles }));
+  const removeEntryAndRecalc = (coord,tileObj) => {
+      if(!tileObj.isEntryPoint) return;
+      tileObj.isEntryPoint=false;
+      // rebuild analysis from scratch
+      rebuildAnalysisFromTiles();
+      setLocalLayout({...localLayout, tiles:[...localLayout.tiles]});
   };
 
   if (!localLayout || !localLayout.tiles) {
@@ -688,8 +630,6 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                         }
                     } else if(flagMode==='remove'){
                         if(tile){ removeEntryAndRecalc(coord,tile);} 
-                    } else if (flagMode === 'rock') {
-                        if (tile) { placeRockAndRecalc(tile); }
                     } else {
                         // feedback mode (blue flag) behaves as before
                         if (tile?.isEntryPoint) {
@@ -772,7 +712,6 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                <div className="flex gap-1 ml-1">
                  <Button size="xs" variant={flagMode==='entry'?'secondary':'outline'} onClick={()=>setFlagMode('entry')}>🚩 Red</Button>
                  <Button size="xs" variant={flagMode==='feedback'?'secondary':'outline'} onClick={()=>setFlagMode('feedback')}>🏳️ Blue</Button>
-                 <Button size="xs" variant={flagMode==='rock'?'secondary':'outline'} onClick={()=>setFlagMode('rock')}>🪨 Rock</Button>
                  <Button size="xs" variant={flagMode==='remove'?'secondary':'outline'} onClick={()=>setFlagMode('remove')}>❌ Remove</Button>
                </div>
              )}
