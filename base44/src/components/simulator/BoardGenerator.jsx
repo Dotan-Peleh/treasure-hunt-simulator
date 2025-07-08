@@ -373,19 +373,24 @@ export const generateBoardLayout = (config) => {
             }
         }
     }
-    const pathCosts = all_paths.map(p => p.cost);
+    // Costs for every generated strategic path (including dead-ends)
+    const pathCostsAll = all_paths.map(p => Math.ceil(p.cost));
 
-    const avgCost = pathCosts.length > 0 ? pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length : 0;
-    const maxDiff = pathCosts.length > 0 ? Math.max(...pathCosts.map(c => Math.abs(c - avgCost))) : 0;
+    // Metrics should ignore dead-end paths because they don’t reach the key
+    const successfulPaths = all_paths.filter(p => p.reachedKey !== false);
+    const successfulCosts = successfulPaths.map(p => p.cost);
+
+    const avgCost = successfulCosts.length > 0 ? successfulCosts.reduce((a, b) => a + b, 0) / successfulCosts.length : 0;
+    const maxDiff = successfulCosts.length > 0 ? Math.max(...successfulCosts.map(c => Math.abs(c - avgCost))) : 0;
     const costVariancePercent = avgCost > 0 ? (maxDiff / avgCost) * 100 : 0;
 
     const analysis = {
-        path_costs: pathCosts.map(cost => Math.ceil(cost)),
+        path_costs: pathCostsAll,
         cost_variance: costVariancePercent,
         balanced_costs: costVariancePercent <= 15,
-        shortest_path: pathCosts.length > 0 ? Math.ceil(Math.min(...pathCosts)) : 0,
-        longest_path: pathCosts.length > 0 ? Math.ceil(Math.max(...pathCosts)) : 0,
-        average_path: pathCosts.length > 0 ? pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length : 0,
+        shortest_path: successfulCosts.length > 0 ? Math.ceil(Math.min(...successfulCosts)) : 0,
+        longest_path: successfulCosts.length > 0 ? Math.ceil(Math.max(...successfulCosts)) : 0,
+        average_path: successfulCosts.length > 0 ? successfulCosts.reduce((a, b) => a + b, 0) / successfulCosts.length : 0,
         all_paths: all_paths,
         key_cost: 0,
         milestones: milestones,

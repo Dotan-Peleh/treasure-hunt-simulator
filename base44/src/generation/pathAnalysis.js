@@ -79,7 +79,10 @@ export function findAllPathsFromEntries(grid, allTiles) {
         candidates.push({ r: r + 1, c, priority: 2 });
       }
 
-      if (!candidates.length) break; // dead-end
+      if (!candidates.length) {
+        // We hit a dead-end; return what we have so far.
+        return { path, cost, reachedKey: false };
+      }
 
       // 10 % random noise override
       if (opts.noise && Math.random() < 0.10) {
@@ -111,7 +114,8 @@ export function findAllPathsFromEntries(grid, allTiles) {
       visited.add(coord);
     }
 
-    return path[path.length - 1] === keyStr ? { path, cost } : null;
+    // Reached key successfully
+    return { path, cost, reachedKey: true };
   };
 
   const all_paths = [];
@@ -132,7 +136,7 @@ export function findAllPathsFromEntries(grid, allTiles) {
     while (queue.length && emitted < MAX_BRANCH_PATHS) {
       const node = queue.shift();
       if (node.path[node.path.length - 1] === keyStr) {
-        addPath({ path: node.path, cost: node.cost });
+        addPath({ path: node.path, cost: node.cost, reachedKey: true });
         emitted++;
         continue;
       }
@@ -164,6 +168,13 @@ export function findAllPathsFromEntries(grid, allTiles) {
           cost: node.cost + stepCost(cand.r, cand.c),
           visited: newVisited
         });
+      }
+
+      // If there are no further moves and we're stuck, record this dead-end path.
+      if (!candidates.length) {
+        addPath({ path: node.path, cost: node.cost, reachedKey: false });
+        emitted++;
+        continue;
       }
     }
   };
