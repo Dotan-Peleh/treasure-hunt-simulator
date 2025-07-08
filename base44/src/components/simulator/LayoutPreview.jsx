@@ -55,6 +55,7 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
   };
 
   const [editingEntry, setEditingEntry] = useState(false);
+  const [flagMode, setFlagMode] = useState('feedback'); // 'feedback' | 'entry' | 'remove'
 
   // Helper to adjust every tile level in the selected path by delta (+1 or -1)
   const adjustPathLevels = (delta) => {
@@ -63,6 +64,7 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
     if (!path || !path.path) return;
 
     const stepCost = (level) => Math.pow(2, level - 1);
+    const chainMaxMap = { orange: 12, blue: 8, green: 10 };
 
     const newTiles = localLayout.tiles.map(t => ({ ...t }));
     let newCost = 0;
@@ -73,8 +75,8 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
       if (idx === -1) return;
       const tile = { ...newTiles[idx] };
       if (!tile.required_item_level) return;
-      const chainMax = 12; // hard cap; could derive from chain meta
-      const newLevel = Math.min(chainMax, Math.max(1, tile.required_item_level + delta));
+      const chainMax = chainMaxMap[tile.required_item_chain_color] || 12;
+      const newLevel = Math.min(chainMax - 1, Math.max(2, tile.required_item_level + delta));
       tile.required_item_level = newLevel;
       if (tile.required_item_name) {
         const parts = tile.required_item_name.split(' L');
@@ -394,6 +396,117 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
     return [];
   }, [selectedPathIndex, localAnalysis]);
 
+  const stepCostGlobal = (level) => Math.pow(2, level - 1);
+
+  // Add helper to recompute analysis completely from current tiles
+  const rebuildAnalysisFromTiles = () => {
+      const { findAllPathsFromEntries } = require('@/generation/pathAnalysis');
+      // rebuild grid snapshot to reflect current tiles
+      const freshGrid = Array(9).fill(null).map(()=>Array(7).fill(null));
+      localLayout.tiles.forEach(t=>{ if(t.row-1>=0&&t.row-1<9&&t.col-1>=0&&t.col-1<7) freshGrid[t.row-1][t.col-1]=t; });
+      const { all_paths } = findAllPathsFromEntries(freshGrid, localLayout.tiles);
+      const path_costs = all_paths.map(p=>p.cost);
+      const avg = path_costs.length? path_costs.reduce((a,b)=>a+b,0)/path_costs.length:0;
+      const maxDiff = path_costs.length? Math.max(...path_costs.map(c=>Math.abs(c-avg))):0;
+      const newAnalysis = { ...localAnalysis };
+      newAnalysis.all_paths = all_paths;
+      newAnalysis.path_costs = path_costs;
+      newAnalysis.shortest_path = path_costs.length? Math.min(...path_costs):0;
+      newAnalysis.longest_path  = path_costs.length? Math.max(...path_costs):0;
+      newAnalysis.average_path  = avg;
+      newAnalysis.cost_variance = avg>0? (maxDiff/avg)*100:0;
+      newAnalysis.balanced_costs = newAnalysis.cost_variance<=15;
+      setLocalAnalysis(newAnalysis);
+      setSelectedPathIndex(null);
+  };
+
+  const addEntryAndRecalc = (coord, tileObj) => {
+      // If this coord already entry, skip
+      if (tileObj.isEntryPoint) return;
+      tileObj.isEntryPoint = true;
+      tileObj.discovered = true;
+
+      // Find existing path containing coord
+      const existingPathIdx = localAnalysis.all_paths.findIndex(p => p.path.includes(coord));
+      let newPathCoords = [];
+      if (existingPathIdx !== -1) {
+        const fullPath = localAnalysis.all_paths[existingPathIdx].path;
+        const sliceStart = fullPath.indexOf(coord);
+        newPathCoords = fullPath.slice(sliceStart);
+      } else {
+        // compute via BFS over passable tiles
+        const rows = 9, cols = 7;
+        const passable = (r,cx) => {
+          const t = grid[r][cx];
+          if(!t) return false;
+          return ['semi_locked','key','free','generator_green','generator_mixed'].includes(t.tile_type);
+        };
+        const [sr,sc] = coord.split(',').map(Number);
+        let keyPos=null;
+        for(let r=0;r<rows;r++){ for(let c2=0;c2<cols;c2++){ if(grid[r][c2]?.tile_type==='key'){keyPos=[r,c2];break;} } if(keyPos) break;}
+        if(!keyPos) return;
+        const queue=[[sr,sc]];
+        const prevMap = new Map();
+        prevMap.set(`${sr},${sc}`, null);
+        const dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+        while(queue.length){
+          const [r,cx] = queue.shift();
+          if(r===keyPos[0] && cx===keyPos[1]){
+            // build path
+            const pathRev=[];
+            let cur=`${r},${cx}`;
+            while(cur){ pathRev.push(cur); cur=prevMap.get(cur);} 
+            newPathCoords=pathRev.reverse();
+            break;
+          }
+          for(const [dr,dc] of dirs){
+            const nr=r+dr,nc=cx+dc;
+            if(nr<0||nr>=rows||nc<0||nc>=cols) continue;
+            if(!passable(nr,nc)) continue;
+            const key=`${nr},${nc}`;
+            if(prevMap.has(key)) continue;
+            prevMap.set(key,`${r},${cx}`);
+            queue.push([nr,nc]);
+          }
+        }
+        if(newPathCoords.length===0) return; // no path
+      }
+
+      // compute cost
+      let cost = 0;
+      newPathCoords.forEach(c=>{
+        const [r,cx]=c.split(',').map(Number);
+        const t = localLayout.tiles.find(t2=>t2.row===r+1&&t2.col===cx+1);
+        if(t&&t.required_item_level) cost += stepCostGlobal(t.required_item_level);
+      });
+      const newPathObj = { path: newPathCoords, cost: Math.ceil(cost) };
+
+      const newAnalysis = { ...localAnalysis };
+      newAnalysis.all_paths = [...newAnalysis.all_paths, newPathObj];
+      newAnalysis.path_costs = [...newAnalysis.path_costs, Math.ceil(cost) ];
+
+      // recompute variance
+      const avg = newAnalysis.path_costs.reduce((a,b)=>a+b,0)/newAnalysis.path_costs.length;
+      const maxDiff = Math.max(...newAnalysis.path_costs.map(c=>Math.abs(c-avg)));
+      newAnalysis.cost_variance = avg>0 ? (maxDiff/avg)*100 : 0;
+      newAnalysis.balanced_costs = newAnalysis.cost_variance <= 15;
+      newAnalysis.shortest_path = newAnalysis.path_costs.length>0? Math.min(...newAnalysis.path_costs) : 0;
+      newAnalysis.longest_path  = newAnalysis.path_costs.length>0? Math.max(...newAnalysis.path_costs) : 0;
+      newAnalysis.average_path  = newAnalysis.path_costs.length>0? (newAnalysis.path_costs.reduce((a,b)=>a+b,0)/newAnalysis.path_costs.length) : 0;
+
+      setLocalAnalysis(newAnalysis);
+      setLocalLayout({...localLayout, tiles:[...localLayout.tiles]});
+      // pathEntryMap etc will update via memo
+  };
+
+  const removeEntryAndRecalc = (coord,tileObj) => {
+      if(!tileObj.isEntryPoint) return;
+      tileObj.isEntryPoint=false;
+      // rebuild analysis from scratch
+      rebuildAnalysisFromTiles();
+      setLocalLayout({...localLayout, tiles:[...localLayout.tiles]});
+  };
+
   if (!localLayout || !localLayout.tiles) {
     return (
       <Card>
@@ -509,16 +622,25 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                 key={`${rowIndex}-${colIndex}`}
                 onClick={() => {
                   if (editingEntry) {
-                    if (tile?.isEntryPoint) {
-                      const sup = Array.isArray(feedback.suppressFlags) ? [...feedback.suppressFlags] : [];
-                      const si = sup.indexOf(coord);
-                      if (si === -1) sup.push(coord); else sup.splice(si,1);
-                      updateFeedback({ suppressFlags: sup });
+                    if(flagMode==='entry'){
+                        if(tile){
+                          addEntryAndRecalc(coord,tile);
+                        }
+                    } else if(flagMode==='remove'){
+                        if(tile){ removeEntryAndRecalc(coord,tile);} 
                     } else {
-                      const arr = Array.isArray(feedback.entryOverride) ? [...feedback.entryOverride] : [];
-                      const idx = arr.indexOf(coord);
-                      if (idx === -1) arr.push(coord); else arr.splice(idx,1);
-                      updateFeedback({ entryOverride: arr });
+                        // feedback mode (blue flag) behaves as before
+                        if (tile?.isEntryPoint) {
+                          const sup = Array.isArray(feedback.suppressFlags) ? [...feedback.suppressFlags] : [];
+                          const si = sup.indexOf(coord);
+                          if (si === -1) sup.push(coord); else sup.splice(si,1);
+                          updateFeedback({ suppressFlags: sup });
+                        } else {
+                          const arr = Array.isArray(feedback.entryOverride) ? [...feedback.entryOverride] : [];
+                          const idx = arr.indexOf(coord);
+                          if (idx === -1) arr.push(coord); else arr.splice(idx,1);
+                          updateFeedback({ entryOverride: arr });
+                        }
                     }
                     setEditingEntry(false);
                     return;
@@ -580,9 +702,17 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                onClick={() => updateFeedback({ label: 'bad' })}
                className={`px-2 py-0.5 text-xs rounded border ${feedback.label==='bad' ? 'bg-red-100 border-red-400' : 'border-gray-300'}`}>👎</button>
              <button
-               title="Edit entry flag"
-               onClick={() => setEditingEntry(e => !e)}
-               className={`px-2 py-0.5 text-xs rounded border ${editingEntry ? 'bg-blue-100 border-blue-400' : 'border-gray-300'}`}>✏️</button>
+                title="Edit flags"
+                onClick={() => {
+                  if(editingEntry){setEditingEntry(false);} else {setFlagMode('feedback');setEditingEntry(true);} }}
+                className={`px-2 py-0.5 text-xs rounded border ${editingEntry ? 'bg-blue-100 border-blue-400' : 'border-gray-300'}`}>✏️</button>
+             {editingEntry && (
+               <div className="flex gap-1 ml-1">
+                 <Button size="xs" variant={flagMode==='entry'?'secondary':'outline'} onClick={()=>setFlagMode('entry')}>🚩 Red</Button>
+                 <Button size="xs" variant={flagMode==='feedback'?'secondary':'outline'} onClick={()=>setFlagMode('feedback')}>🏳️ Blue</Button>
+                 <Button size="xs" variant={flagMode==='remove'?'secondary':'outline'} onClick={()=>setFlagMode('remove')}>❌ Remove</Button>
+               </div>
+             )}
              <button
                title="Export feedback JSON"
                onClick={exportFeedback}
@@ -767,40 +897,16 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                   <span className={`font-semibold ${localAnalysis.balanced_costs ? 'text-green-700' : 'text-yellow-800'}`}>{localAnalysis.cost_variance.toFixed(1)}%</span>
                 </div>
                  <div className="flex justify-between font-semibold">
-                    <span>Shortest Path:</span>
+                    <span>Cheapest Path:</span>
                     <span>{localAnalysis.shortest_path}</span>
                 </div>
                 <div className="flex justify-between font-semibold">
-                    <span>Longest Path:</span>
+                    <span>Most Expensive Path:</span>
                     <span>{localAnalysis.longest_path}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>Average Path:</span>
-                  <span>{localAnalysis.average_path.toFixed(1)}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="col-span-2">
-              <h4 className="font-medium mb-2">Scores</h4>
-              <div className="grid grid-cols-3 gap-4">
-                <div className="text-center">
-                  <div className="text-lg font-bold text-green-600">
-                    {localAnalysis.balance_score?.toFixed(1) || 'N/A'}
-                  </div>
-                  <div className="text-xs text-muted-foreground">Balance</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-lg font-bold text-blue-600">
-                    {localAnalysis.complexity_score?.toFixed(1) || 'N/A'}
-                  </div>
-                  <div className="text-xs text-muted-foreground">Complexity</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-lg font-bold text-purple-600">
-                    {localAnalysis.strategic_variance?.toFixed(1) || 'N/A'}
-                  </div>
-                  <div className="text-xs text-muted-foreground">Strategic</div>
+                  <span>Average (Cheap &amp; Expensive):</span>
+                  <span>{((localAnalysis.shortest_path+localAnalysis.longest_path)/2).toFixed(1)}</span>
                 </div>
               </div>
             </div>

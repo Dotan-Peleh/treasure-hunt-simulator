@@ -36,24 +36,33 @@ export class LayoutManager {
                 c: Math.floor(this.cols / 2) + (Math.random() < 0.5 ? -1 : 1)
             };
             // Two paths meet at midPoint, then one path from there to key
-            configs.push({ start: { r: this.rows - 2, c: startCols[0] }, end: midPoint });
-            configs.push({ start: { r: this.rows - 2, c: startCols[startCols.length-1] }, end: midPoint });
+            // For Y-junctions, also start one row above the start area
+            configs.push({ start: { r: this.rows - 3, c: startCols[0] }, end: midPoint });
+            configs.push({ start: { r: this.rows - 3, c: startCols[startCols.length-1] }, end: midPoint });
             return configs;
         }
 
         for (let i = 0; i < pathCount; i++) {
-            const startRow = (this.rows - 1) - Math.floor(Math.random() * 2);
+            // Allow starts on row indices 6, 7, or 8 (labels 3, 2, 1).
+            // If we start on rows 7 or 8 (the rows that contain the free cluster),
+            // force the column to be outside that cluster (cols 0-3 are reserved).
+            const rowCandidates = [this.rows - 3, this.rows - 2, this.rows - 1]; // 6,7,8
+            let startRow = rowCandidates[Math.floor(Math.random() * rowCandidates.length)];
+            let startCol = startCols[i];
+            if (startRow >= this.rows - 2 && startCol <= 3) {
+                // Bump to the first safe column on the right side.
+                startCol = 4 + (i % (this.cols - 4));
+            }
             const endPoint = this.getRandomEndPoint();
 
             if (pattern === 'vertical_lanes') {
-                endPoint.c = startCols[i]; // End in same column as start
+                endPoint.c = startCol; // End in same column as start
             } else if (pattern === 's_curves' && pathCount === 2) {
                 // Mirrored start/end points for S-shape
-                const endCol = this.cols - 1 - startCols[i];
+                const endCol = this.cols - 1 - startCol;
                 endPoint.c = endCol;
             }
-
-            configs.push({ start: { r: startRow, c: startCols[i] }, end: endPoint });
+            configs.push({ start: { r: startRow, c: startCol }, end: endPoint });
         }
         return configs;
     }

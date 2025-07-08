@@ -101,11 +101,35 @@ export const generateBoardLayout = (config) => {
         grid[tile.r][tile.c] = 'free';
     }
 
+    // --- ENFORCE EXACTLY 8 FREE TILES (excluding start tiles) ---
+    const collectTilesOfType = (type) => {
+        const arr=[];
+        for(let r=0;r<rows;r++){
+          for(let c=0;c<cols;c++) if(grid[r][c]===type) arr.push({r,c});
+        }
+        return arr;
+    };
+
+    const isStartArea = (r,c) => (r>=7 && r<=8 && c>=0 && c<=2);
+
+    // Force exactly two extra free tiles adjacent: (row 7,col3) and (row8,col3)
+    // Always override whatever is currently in those cells to ensure we have 8 contiguous free tiles.
+    const extraCoords = [ {r:7,c:3}, {r:8,c:3} ];
+    extraCoords.forEach(({r,c})=>{ grid[r][c]='free'; });
+
+    // Remove any other accidental free tiles outside start area and extras
+    collectTilesOfType('free').forEach(({r,c})=>{
+        if(isStartArea(r,c)) return;
+        if(!extraCoords.some(ec=>ec.r===r&&ec.c===c)){
+            grid[r][c]='rock';
+        }
+    });
+
     // Final pass to ensure all non-path, non-start tiles are rocks
     for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
             const type = grid[r][c];
-            if (type !== 'start' && !type.startsWith('path') && !type.startsWith('generator') && type !== 'key' && type !== 'bridge') {
+            if (type !== 'start' && type !== 'free' && !type.startsWith('path') && !type.startsWith('generator') && type !== 'key' && type !== 'bridge') {
                 grid[r][c] = 'rock';
             }
         }
@@ -332,6 +356,23 @@ export const generateBoardLayout = (config) => {
             t.isEntryPoint = false; // Change to false instead of deleting
         }
     });
+
+    // Ensure at least one entry point exists and is reachable
+    if (!tiles.some(t => t.isEntryPoint)) {
+        // Attempt to flag the bottom-most tile of the first existing path as the entry.
+        if (nonEmptyPaths.length > 0) {
+            const path0 = nonEmptyPaths[0];
+            // Bottom-most = highest row index
+            const maxRow = Math.max(...path0.map(t => t.r));
+            const bottomTiles = path0.filter(t => t.r === maxRow);
+            const chosen = bottomTiles[0];
+            const fallback = tiles.find(t => t.row === chosen.r + 1 && t.col === chosen.c + 1);
+            if (fallback) {
+                fallback.isEntryPoint = true;
+                fallback.discovered = true;
+            }
+        }
+    }
     const pathCosts = all_paths.map(p => p.cost);
 
     const avgCost = pathCosts.length > 0 ? pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length : 0;

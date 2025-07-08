@@ -46,7 +46,7 @@ export default function LayoutGeneratorSimulator() {
     // The actual rewards and rows will be generated dynamically.
     milestoneCount: 3, 
     pathCount: 2,
-    freeTileCount: 10,
+    freeTileCount: 2,
     pathPattern: 'random', // 'random', 'vertical', 's_curve', 'y_junction'
   });
   
@@ -108,8 +108,9 @@ export default function LayoutGeneratorSimulator() {
       // "Max line 3" from the bottom corresponds to tile.row >= 7.
       const entryPoints = result.tiles.filter(t => t.isEntryPoint);
       for (const entry of entryPoints) {
-        if (entry.row < 8) {
-          return null; // Discard layout if an entry point is higher than row 8 (max line 2).
+        if (entry.row < 7) {
+          // Discard layout if an entry point is above row 7 (third line from bottom)
+          return null;
         }
       }
 
@@ -187,10 +188,10 @@ export default function LayoutGeneratorSimulator() {
       const layoutInfo = finalGenerationQueue[i];
       const newConfig = { ...generationConfig, pathCount: layoutInfo.pathCount || generationConfig.pathCount };
       let layout = generateSingleLayout(layoutInfo.id, layoutInfo.name, newConfig, layoutInfo.grid);
-      if (layout && !layout.analysis.balanced_costs) {
-        layout = balanceSingleLayout(layout);
-      }
-      if (layout && layout.analysis.balanced_costs) {
+      if (layout) {
+        if (!layout.analysis.balanced_costs) {
+          layout = balanceSingleLayout(layout); // attempt repair but keep regardless
+        }
         newLayouts.push(layout);
       }
       
@@ -287,7 +288,6 @@ export default function LayoutGeneratorSimulator() {
 
   const getFilteredAndSortedLayouts = () => {
     let filtered = generatedLayouts.filter(layout => {
-      if(!layout.analysis.balanced_costs) return false;
       const analysis = layout.analysis;
       if (analysis.cost_variance < filters.minCostVariance || analysis.cost_variance > filters.maxCostVariance) return false;
       if (analysis.total_path_tiles < filters.minPathTiles || analysis.total_path_tiles > filters.maxPathTiles) return false;

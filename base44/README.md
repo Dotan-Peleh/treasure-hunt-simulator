@@ -112,7 +112,7 @@ LayoutGeneratorSimulator
 | 2 | Fixed 3×2 **start area** at bottom-left. | `setupGrid`. |
 | 3 | **Entry points** must start on rows 7-9. | Discard layout in `LayoutGeneratorSimulator` if any `entry.row < 7`. |
 | 4 | All key & path tiles must be reachable. | `validateAndRepairLayout` BFS + bridge repair. |
-| 5 | Progressive costs (Levels 2-7) bottom→top. | `assignProgressionCosts`. |
+| 5 | Progressive costs; each tile’s level range is 2 … (chainMax-1). | `assignProgressionCosts` + Balancers |
 | 6 | Cost variance ≤ 15 % of mean. | Post-gen rule in simulator. |
 | 7 | Two generators fixed in start area. | `placeGeneratorsAndFrees`. |
 | 8 | Extra free tiles (slider 5-15). | Same helper. |
