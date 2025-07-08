@@ -251,7 +251,67 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
       iterations++;
     }
 
-    // Recompute analysis path costs
+    // Enforce variety: no more than 2 identical item IDs in a row per path
+    const enforceVariety = () => {
+      localAnalysis.all_paths.forEach((p, idx) => {
+        const tilesArr = pathTileRefs[idx];
+        let prevLvl = null, run = 0;
+        tilesArr.forEach(tile => {
+          const lvl = tile.required_item_level;
+          if (lvl === prevLvl) {
+            run += 1;
+          } else {
+            run = 1; prevLvl = lvl;
+          }
+          if (run > 2) {
+            // tweak level by +/-1 to break repetition, clamp 2-12
+            const prevLevel = tile.required_item_level;
+            let newLevel = prevLevel + (prevLevel > 6 ? -1 : 1);
+            if (newLevel < 2) newLevel = prevLevel + 1; if (newLevel > 12) newLevel = prevLevel - 1;
+            tile.required_item_level = newLevel;
+            const parts = tile.required_item_name.split(' L');
+            tile.required_item_name = `${parts[0]} L${newLevel}`;
+            pathCosts[idx] += stepCost(newLevel) - stepCost(prevLevel);
+            prevLvl = newLevel;
+            run = 1;
+          }
+        });
+      });
+    };
+
+    enforceVariety();
+
+    const enforceLevelDistribution = () => {
+      pathTileRefs.forEach((tilesArr, idx) => {
+        if (tilesArr.length < 3) return;
+        const limit = Math.ceil(tilesArr.length * 0.4); // 40% max same level
+        let counts = {};
+        tilesArr.forEach(t => { counts[t.required_item_level] = (counts[t.required_item_level] || 0) + 1; });
+        let dominantLevel = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+        let distinct = Object.keys(counts).length;
+        let safety = 60;
+        while ((counts[dominantLevel] > limit || distinct < 3) && safety--) {
+          const candidates = tilesArr.filter(t => t.required_item_level === Number(dominantLevel));
+          if (!candidates.length) break;
+          const tile = candidates[Math.floor(Math.random() * candidates.length)];
+          const prevLevel = tile.required_item_level;
+          let newLevel = prevLevel + (prevLevel > 6 ? -1 : 1);
+          if (newLevel < 2) newLevel = prevLevel + 1; if (newLevel > 12) newLevel = prevLevel - 1;
+          tile.required_item_level = newLevel;
+          const parts = tile.required_item_name.split(' L');
+          tile.required_item_name = `${parts[0]} L${newLevel}`;
+          pathCosts[idx] += stepCost(newLevel) - stepCost(prevLevel);
+          // update counts
+          counts[prevLevel]--; counts[newLevel] = (counts[newLevel] || 0) + 1;
+          dominantLevel = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+          distinct = Object.keys(counts).length;
+        }
+      });
+    };
+
+    enforceLevelDistribution();
+
+    // Recompute analysis path costs after variety tweak
     const newPathCosts = pathCosts.map(c => Math.ceil(c));
     const avg = newPathCosts.reduce((a, b) => a + b, 0) / newPathCosts.length;
     const maxDiff = Math.max(...newPathCosts.map(c => Math.abs(c - avg)));
@@ -553,7 +613,14 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                 </div>
               </>
             )}
-            {boardGrid}
+            <div className="relative">
+              {boardGrid}
+              {selectedPathIndex !== null && (
+                <div className="absolute -top-5 right-0 bg-white border rounded px-2 py-0.5 text-xs font-semibold shadow">
+                  Cost: {localAnalysis.path_costs[selectedPathIndex]}
+                </div>
+              )}
+            </div>
         </div>
 
         {/* Comment box */}

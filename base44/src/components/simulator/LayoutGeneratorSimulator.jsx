@@ -186,8 +186,11 @@ export default function LayoutGeneratorSimulator() {
     for (let i = 0; i < total; i++) {
       const layoutInfo = finalGenerationQueue[i];
       const newConfig = { ...generationConfig, pathCount: layoutInfo.pathCount || generationConfig.pathCount };
-      const layout = generateSingleLayout(layoutInfo.id, layoutInfo.name, newConfig, layoutInfo.grid);
-      if (layout) {
+      let layout = generateSingleLayout(layoutInfo.id, layoutInfo.name, newConfig, layoutInfo.grid);
+      if (layout && !layout.analysis.balanced_costs) {
+        layout = balanceSingleLayout(layout);
+      }
+      if (layout && layout.analysis.balanced_costs) {
         newLayouts.push(layout);
       }
       
@@ -284,6 +287,7 @@ export default function LayoutGeneratorSimulator() {
 
   const getFilteredAndSortedLayouts = () => {
     let filtered = generatedLayouts.filter(layout => {
+      if(!layout.analysis.balanced_costs) return false;
       const analysis = layout.analysis;
       if (analysis.cost_variance < filters.minCostVariance || analysis.cost_variance > filters.maxCostVariance) return false;
       if (analysis.total_path_tiles < filters.minPathTiles || analysis.total_path_tiles > filters.maxPathTiles) return false;
@@ -350,6 +354,129 @@ export default function LayoutGeneratorSimulator() {
     } catch {/* ignore */}
   };
 
+  const stepCost = (lvl) => Math.pow(2, lvl - 1);
+
+  const balanceSingleLayout = (layout) => {
+    if (layout.analysis.balanced_costs) return layout; // already good
+    // Deep copy tiles so we don't mutate original reference
+    const newLayout = { ...layout, tiles: layout.tiles.map(t => ({ ...t })), analysis: { ...layout.analysis } };
+    const tiles = newLayout.tiles;
+    const getTileObj = (r, c) => tiles.find(t => t.row === r + 1 && t.col === c + 1);
+
+    const pathTileRefs = newLayout.analysis.all_paths.map(p =>
+      p.path.map(coord => {
+        const [r, c] = coord.split(',').map(Number);
+        return getTileObj(r, c);
+      }).filter(t => t && t.required_item_level)
+    );
+
+    const computeCosts = () => pathTileRefs.map(arr => arr.reduce((sum, t) => sum + stepCost(t.required_item_level), 0));
+
+    let pathCosts = computeCosts();
+    let iterations = 0;
+    const MAX_ITER = 400;
+
+    while (iterations < MAX_ITER) {
+      const avg = pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length;
+      const maxDiff = Math.max(...pathCosts.map(c => Math.abs(c - avg)));
+      const varPct = avg > 0 ? (maxDiff / avg) * 100 : 0;
+      if (varPct <= 15) break;
+
+      let maxIdx = 0, minIdx = 0;
+      pathCosts.forEach((c, idx) => { if (c > pathCosts[maxIdx]) maxIdx = idx; if (c < pathCosts[minIdx]) minIdx = idx; });
+
+      const tweak = (idx, dir) => {
+        const arr = pathTileRefs[idx]
+          .filter(t => (dir === -1 ? t.required_item_level > 2 : t.required_item_level < 12))
+          .sort((a,b)=> dir===-1 ? (b.required_item_level-a.required_item_level) : (a.required_item_level-b.required_item_level));
+        if (!arr.length) return false;
+        // pick random among top 50% to maintain variety
+        const limit = Math.max(1, Math.ceil(arr.length/2));
+        const tile = arr[Math.floor(Math.random()*limit)];
+        const prev = tile.required_item_level;
+        const newLevel = prev + dir;
+        tile.required_item_level = newLevel;
+        if(tile.required_item_name){
+          const parts = tile.required_item_name.split(' L');
+          tile.required_item_name = `${parts[0]} L${newLevel}`;
+        }
+        pathCosts[idx] += dir===1 ? (stepCost(prev+1)-stepCost(prev)) : -(stepCost(prev)-stepCost(prev-1));
+        return true;
+      };
+
+      if (pathCosts[maxIdx] - avg > avg - pathCosts[minIdx]) {
+        if (!tweak(maxIdx, -1)) break;
+      } else {
+        if (!tweak(minIdx, 1)) break;
+      }
+      iterations++;
+    }
+
+    // Variety enforcement: no >2 identical IDs sequentially along each path
+    pathTileRefs.forEach((tilesArr, idxPath) => {
+      let prevLvl=null,run=0;
+      tilesArr.forEach(tile=>{
+        const lvl=tile.required_item_level;
+        if(lvl===prevLvl){run++;} else {run=1; prevLvl=lvl;}
+        if(run>2){
+          const prevLevel=tile.required_item_level;
+          let newLevel = prevLevel + (prevLevel>6?-1:1);
+          if(newLevel<2) newLevel=prevLevel+1; if(newLevel>12) newLevel=prevLevel-1;
+          tile.required_item_level=newLevel;
+          const parts=tile.required_item_name.split(' L');
+          tile.required_item_name=`${parts[0]} L${newLevel}`;
+          pathCosts[idxPath]+= stepCost(newLevel)-stepCost(prevLevel);
+          prevLvl=newLevel;
+          run=1;
+        }
+      });
+    });
+
+    // Ensure mix of levels (distribution rule)
+    pathTileRefs.forEach((tilesArr, idxPath) => {
+      if (tilesArr.length < 3) return;
+      const limit = Math.ceil(tilesArr.length * 0.4);
+      let counts = {};
+      tilesArr.forEach(t => { counts[t.required_item_level] = (counts[t.required_item_level] || 0) + 1; });
+      let dominantLevel = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+      let distinct = Object.keys(counts).length;
+      let guard = 60;
+      while ((counts[dominantLevel] > limit || distinct < 3) && guard--) {
+        const cand = tilesArr.filter(t => t.required_item_level === Number(dominantLevel));
+        if (!cand.length) break;
+        const tile = cand[Math.floor(Math.random() * cand.length)];
+        const prev = tile.required_item_level;
+        let newLvl = prev + (prev>6?-1:1);
+        if (newLvl<2) newLvl=prev+1; if (newLvl>12) newLvl=prev-1;
+        tile.required_item_level=newLvl;
+        const parts = tile.required_item_name.split(' L');
+        tile.required_item_name=`${parts[0]} L${newLvl}`;
+        pathCosts[idxPath]+= stepCost(newLvl)-stepCost(prev);
+        counts[prev]--; counts[newLvl]=(counts[newLvl]||0)+1;
+        dominantLevel = Object.entries(counts).sort((a,b)=>b[1]-a[1])[0][0];
+        distinct = Object.keys(counts).length;
+      }
+    });
+
+    // Update analysis costs and flags
+    const newCosts = pathCosts.map(c=>Math.ceil(c));
+    const avg = newCosts.reduce((a,b)=>a+b,0)/newCosts.length;
+    const maxDiff = Math.max(...newCosts.map(c=>Math.abs(c-avg)));
+    const varPct = avg>0? (maxDiff/avg)*100 : 0;
+
+    newLayout.analysis = { ...newLayout.analysis, path_costs: newCosts, cost_variance: varPct, balanced_costs: varPct<=15 };
+    newLayout.analysis.all_paths = newLayout.analysis.all_paths.map((p,idx)=>({...p,cost:newCosts[idx]}));
+    return newLayout;
+  };
+
+  const handleAutoBalanceAll = () => {
+    if (generatedLayouts.length === 0) return;
+    const balanced = generatedLayouts.map(balanceSingleLayout);
+    setGeneratedLayouts(balanced);
+    analyzeGeneratedLayouts(balanced);
+    alert('Auto-balance completed for all layouts');
+  };
+
   const filteredLayouts = getFilteredAndSortedLayouts();
   const totalPreviewPages = Math.ceil(filteredLayouts.length / PREVIEWS_PER_PAGE);
   const paginatedLayouts = filteredLayouts.slice(
@@ -402,6 +529,10 @@ export default function LayoutGeneratorSimulator() {
           <Button onClick={exportPageFeedback} disabled={paginatedLayouts.length === 0} variant="secondary" className="flex items-center gap-2" title="Export feedback for layouts on this page">
             <Download className="w-4 h-4" />
             Export Page Feedback
+          </Button>
+          <Button onClick={handleAutoBalanceAll} disabled={generatedLayouts.length === 0} variant="outline" className="flex items-center gap-2" title="Balance all layouts to ≤15% variance">
+            <TrendingUp className="w-4 h-4" />
+            Auto Balance All
           </Button>
         </div>
       </div>
