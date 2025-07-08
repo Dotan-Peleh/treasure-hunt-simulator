@@ -131,13 +131,34 @@ Lightweight Manhattan walk with randomised decisions – avoids uniform corridor
 * Final 30 % → Levels 4-7.
 * Cost per tile = 2^(level-1).
 
-### 5.4 Shortest-Path Discovery
-Pure Dijkstra, one optimal path per entry.  (Redundant greedy walk removed.)
+### 5.4 Adaptive Path Discovery
+`findAllPathsFromEntries` now enumerates *multiple* plausible routes per entry:
+
+1. **Up-first deterministic** – mirrors the most common player behaviour.
+2. **Cost-aware sidestep** – will move left/right if that tile is cheaper than the tile above.
+3. **10 % noise variants** – three extra simulations where each move has a 10 % chance to pick any valid tile, producing “imperfect-play” paths.
+4. **Fork exploration** – a bounded BFS (≤20 paths/entry) records every branch whenever equally attractive moves exist, ensuring true forks are represented.
+
+All unique paths are deduplicated and returned with individual costs.
+
+### 5.5 Auto Cost Balancer
+After initial progressive difficulty assignment, the generator runs an **auto-balance loop**:
+
+• Calculates current cost for each path.
+• Iteratively lowers the highest-cost path (or raises the lowest) by one item level at a time, always picking the most impactful tile.
+• Stops once every path is within **±15 % of the average path cost** (or after 300 tweaks).
+
+The layout analysis gains:
+```json
+"cost_variance": 12.5,          // percentage difference to mean
+"balanced_costs": true          // helper flag for UI badges
+```
 
 ## 6. Scoring Metrics
 | Metric | Formula |
 |---------|---------|
-| `cost_variance` | max(path_cost) − min(path_cost) |
+| `cost_variance` | (max |cost − avg| / avg) × 100 % |
+| `balanced_costs` | Boolean: true if `cost_variance` ≤ 15 % |
 | `balance_score` | 100 − min(30, variance/10) + (min_len/max_len)*10 |
 | `complexity_score` | min(total_tiles/2,30)+20*(has_connection)+min(bridge*3,25)+min(var/5,25) |
 | `strategic_variance` | ((max_len − min_len)/total_tiles)*100 |

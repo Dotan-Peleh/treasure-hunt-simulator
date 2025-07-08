@@ -171,6 +171,101 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
     setLocalAnalysis(newAnalysis);
   };
 
+  // Automatically balance ALL paths until variance ≤ 15 %
+  const autoBalanceAcrossPaths = () => {
+    if (!localAnalysis?.all_paths || localAnalysis.all_paths.length < 2) return;
+
+    const newTiles = localLayout.tiles.map(t => ({ ...t }));
+
+    const getTileObj = (r, c) => newTiles.find(t => t.row === r + 1 && t.col === c + 1);
+    const stepCost = (lvl) => Math.pow(2, lvl - 1);
+
+    // Build arrays of tile references for quicker iteration per path
+    const pathTileRefs = localAnalysis.all_paths.map(p =>
+      p.path.map(coord => {
+        const [r, c] = coord.split(',').map(Number);
+        return getTileObj(r, c);
+      }).filter(t => t && t.required_item_level)
+    );
+
+    const computeCosts = () => pathTileRefs.map(arr => arr.reduce((sum, t) => sum + stepCost(t.required_item_level), 0));
+
+    let pathCosts = computeCosts();
+    let iterations = 0;
+    const MAX_ITER = 400;
+
+    while (iterations < MAX_ITER) {
+      const avg = pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length;
+      const maxDiff = Math.max(...pathCosts.map(c => Math.abs(c - avg)));
+      const variancePct = avg > 0 ? (maxDiff / avg) * 100 : 0;
+      if (variancePct <= 15) break;
+
+      // Determine which path to tweak
+      let maxIdx = 0, minIdx = 0;
+      pathCosts.forEach((c, idx) => {
+        if (c > pathCosts[maxIdx]) maxIdx = idx;
+        if (c < pathCosts[minIdx]) minIdx = idx;
+      });
+
+      const lowerPath = (idx) => {
+        const tilesArr = pathTileRefs[idx].sort((a, b) => (b.required_item_level || 0) - (a.required_item_level || 0));
+        for (const tile of tilesArr) {
+          if (tile.required_item_level > 2) {
+            const prev = tile.required_item_level;
+            tile.required_item_level -= 1;
+            if (tile.required_item_name) {
+              const parts = tile.required_item_name.split(' L');
+              tile.required_item_name = `${parts[0]} L${tile.required_item_level}`;
+            }
+            pathCosts[idx] -= stepCost(prev) - stepCost(prev - 1);
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const raisePath = (idx) => {
+        const tilesArr = pathTileRefs[idx].sort((a, b) => (a.required_item_level || 0) - (b.required_item_level || 0));
+        for (const tile of tilesArr) {
+          if (tile.required_item_level < 12) {
+            const prev = tile.required_item_level;
+            tile.required_item_level += 1;
+            if (tile.required_item_name) {
+              const parts = tile.required_item_name.split(' L');
+              tile.required_item_name = `${parts[0]} L${tile.required_item_level}`;
+            }
+            pathCosts[idx] += stepCost(prev + 1) - stepCost(prev);
+            return true;
+          }
+        }
+        return false;
+      };
+
+      // Decide which adjustment to perform
+      if (pathCosts[maxIdx] - avg > avg - pathCosts[minIdx]) {
+        if (!lowerPath(maxIdx)) break;
+      } else {
+        if (!raisePath(minIdx)) break;
+      }
+
+      iterations++;
+    }
+
+    // Recompute analysis path costs
+    const newPathCosts = pathCosts.map(c => Math.ceil(c));
+    const avg = newPathCosts.reduce((a, b) => a + b, 0) / newPathCosts.length;
+    const maxDiff = Math.max(...newPathCosts.map(c => Math.abs(c - avg)));
+    const costVar = avg > 0 ? (maxDiff / avg) * 100 : 0;
+
+    const newAnalysis = { ...localAnalysis, path_costs: newPathCosts, cost_variance: costVar, balanced_costs: costVar <= 15 };
+    if (newAnalysis.all_paths) {
+      newAnalysis.all_paths = newAnalysis.all_paths.map((p, idx) => ({ ...p, cost: newPathCosts[idx] }));
+    }
+
+    setLocalLayout({ ...localLayout, tiles: newTiles });
+    setLocalAnalysis(newAnalysis);
+  };
+
   const exportFeedback = () => {
     try {
       // Retrieve stored feedback for all layouts (needed to keep thumbs up/down etc.)
@@ -538,6 +633,9 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                     ))}
                   </div>
                 </ScrollArea>
+                <div className="flex gap-2 pt-2">
+                  <Button size="sm" variant="secondary" onClick={autoBalanceAcrossPaths}>Auto Balance Paths</Button>
+                </div>
                 {selectedPathIndex !== null && (
                   <div className="flex gap-2 pt-2">
                     <Button size="sm" variant="outline" onClick={() => adjustPathLevels(1)}>Raise +1</Button>
