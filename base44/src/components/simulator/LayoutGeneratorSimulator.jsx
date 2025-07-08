@@ -22,6 +22,7 @@ import {
 import { generateBoardLayout } from './BoardGenerator';
 import { boardLayouts } from './layout-definitions';
 import LayoutPreview from './LayoutPreview';
+import { recalculateAnalysis } from '@/generation/analysis';
 
 const PREVIEWS_PER_PAGE = 10;
 
@@ -31,6 +32,7 @@ export default function LayoutGeneratorSimulator() {
   const [generatedLayouts, setGeneratedLayouts] = useState([]);
   const [currentAnalysis, setCurrentAnalysis] = useState(null);
   const [previewPage, setPreviewPage] = useState(0);
+  const [lastBalanceCount, setLastBalanceCount] = useState(null);
   
   const [generationConfig, setGenerationConfig] = useState({
     generationType: 'all',
@@ -39,7 +41,7 @@ export default function LayoutGeneratorSimulator() {
     numRandomLayouts: 20,
     itemChains: [
       { chain_name: 'Energy Cell', levels: 12, color: 'orange' },
-      { chain_name: 'Data Chip', levels: 8, color: 'blue' },
+      { chain_name: 'Data Chip', levels: 10, color: 'blue' },
       { chain_name: 'Bio Fuel', levels: 10, color: 'green' }
     ],
     // MILESTONE REWORK: Now controlled by a single 'count' value.
@@ -91,6 +93,11 @@ export default function LayoutGeneratorSimulator() {
     }
   }, [generatedLayouts]);
 
+  // NEW: Reset pagination whenever sorting changes to ensure user sees the top results.
+  useEffect(() => {
+    setPreviewPage(0);
+  }, [sortBy, sortOrder, filters]);
+
   const generateSingleLayout = (layoutId, name, config, customGrid = null) => {
     const layoutConfig = {
       ...config,
@@ -103,6 +110,12 @@ export default function LayoutGeneratorSimulator() {
     
     try {
       const result = generateBoardLayout(layoutConfig);
+
+      // Handle discarded layouts
+      if (!result || !result.analysis) {
+          console.warn(`Layout ${layoutId} was discarded due to generation failure.`);
+          return null; // Explicitly return null for discarded layouts
+      }
 
       // Entry point validation: ensure entry points are not too high on the board.
       // "Max line 3" from the bottom corresponds to tile.row >= 7.
@@ -117,7 +130,7 @@ export default function LayoutGeneratorSimulator() {
       // The 15% cost deviation rule has been removed. All layouts will be kept.
 
       return {
-        id: layoutId,
+        id: String(layoutId), // Ensure ID is always a string
         name: name,
         tiles: result.tiles,
         analysis: {
@@ -143,6 +156,7 @@ export default function LayoutGeneratorSimulator() {
     setGenerationProgress(0);
     setGeneratedLayouts([]);
     setCurrentAnalysis(null);
+    setLastBalanceCount(null);
 
     const baseLayouts = (generationConfig.generationType === 'all' || generationConfig.generationType === 'base' || generationConfig.generationType === 'variations')
       ? boardLayouts.map(l => ({ id: l.id, name: l.name, grid: null }))
@@ -187,16 +201,22 @@ export default function LayoutGeneratorSimulator() {
     for (let i = 0; i < total; i++) {
       const layoutInfo = finalGenerationQueue[i];
       const newConfig = { ...generationConfig, pathCount: layoutInfo.pathCount || generationConfig.pathCount };
-      let layout = generateSingleLayout(layoutInfo.id, layoutInfo.name, newConfig, layoutInfo.grid);
+      
+      let layout = null;
+      try {
+        layout = generateSingleLayout(layoutInfo.id, layoutInfo.name, newConfig, layoutInfo.grid);
+      } catch (error) {
+        console.error(`Critical error generating layout ${layoutInfo.id}:`, error);
+      }
+
       if (layout) {
         if (!layout.analysis.balanced_costs) {
-          layout = balanceSingleLayout(layout); // attempt repair but keep regardless
+          layout = balanceSingleLayout(layout);
         }
         newLayouts.push(layout);
       }
       
       setGenerationProgress((i + 1) / total * 100);
-      // Yield to main thread to prevent freezing
       await new Promise(resolve => setTimeout(resolve, 0)); 
     }
 
@@ -298,12 +318,20 @@ export default function LayoutGeneratorSimulator() {
       }
       return true;
     });
+
+    // New two-tiered sorting: Balanced layouts first, then by the selected criteria.
     filtered.sort((a, b) => {
+      // Primary sort: balanced status
+      if (a.analysis.balanced_costs && !b.analysis.balanced_costs) return -1;
+      if (!a.analysis.balanced_costs && b.analysis.balanced_costs) return 1;
+
+      // Secondary sort: user-selected criteria
       const aValue = a.analysis[sortBy];
       const bValue = b.analysis[sortBy];
       if (sortOrder === 'asc') return aValue - bValue;
       else return bValue - aValue;
     });
+    
     return filtered;
   };
 
@@ -349,6 +377,7 @@ export default function LayoutGeneratorSimulator() {
     setGeneratedLayouts([]);
     setCurrentAnalysis(null);
     setPreviewPage(0);
+    setLastBalanceCount(null);
     try {
       localStorage.removeItem('layoutFeedback');
     } catch {/* ignore */}
@@ -358,10 +387,11 @@ export default function LayoutGeneratorSimulator() {
 
   const balanceSingleLayout = (layout) => {
     if (layout.analysis.balanced_costs) return layout; // already good
-    // Deep copy tiles so we don't mutate original reference
-    const newLayout = { ...layout, tiles: layout.tiles.map(t => ({ ...t })), analysis: { ...layout.analysis } };
+    
+    const newLayout = { ...layout, tiles: layout.tiles.map(t => ({ ...t })) };
     const tiles = newLayout.tiles;
     const getTileObj = (r, c) => tiles.find(t => t.row === r + 1 && t.col === c + 1);
+    const chainMaxMap = { orange: 12, blue: 10, green: 10 };
 
     const pathTileRefs = newLayout.analysis.all_paths.map(p =>
       p.path.map(coord => {
@@ -378,106 +408,109 @@ export default function LayoutGeneratorSimulator() {
 
     while (iterations < MAX_ITER) {
       const avg = pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length;
-      const maxDiff = Math.max(...pathCosts.map(c => Math.abs(c - avg)));
-      const varPct = avg > 0 ? (maxDiff / avg) * 100 : 0;
-      if (varPct <= 15) break;
-
       let maxIdx = 0, minIdx = 0;
       pathCosts.forEach((c, idx) => { if (c > pathCosts[maxIdx]) maxIdx = idx; if (c < pathCosts[minIdx]) minIdx = idx; });
 
-      const tweak = (idx, dir) => {
-        const arr = pathTileRefs[idx]
-          .filter(t => (dir === -1 ? t.required_item_level > 2 : t.required_item_level < 12))
-          .sort((a,b)=> dir===-1 ? (b.required_item_level-a.required_item_level) : (a.required_item_level-b.required_item_level));
-        if (!arr.length) return false;
-        // pick random among top 50% to maintain variety
-        const limit = Math.max(1, Math.ceil(arr.length/2));
-        const tile = arr[Math.floor(Math.random()*limit)];
-        const prev = tile.required_item_level;
-        const newLevel = prev + dir;
-        tile.required_item_level = newLevel;
-        if(tile.required_item_name){
-          const parts = tile.required_item_name.split(' L');
-          tile.required_item_name = `${parts[0]} L${newLevel}`;
-        }
-        pathCosts[idx] += dir===1 ? (stepCost(prev+1)-stepCost(prev)) : -(stepCost(prev)-stepCost(prev-1));
-        return true;
-      };
+      // If the difference is zero, the paths are perfectly balanced.
+      if (pathCosts[maxIdx] === pathCosts[minIdx]) break;
 
-      if (pathCosts[maxIdx] - avg > avg - pathCosts[minIdx]) {
-        if (!tweak(maxIdx, -1)) break;
-      } else {
-        if (!tweak(minIdx, 1)) break;
+      const direction = (pathCosts[maxIdx] - avg > avg - pathCosts[minIdx]) ? -1 : 1;
+      const pathToTweakIdx = direction === -1 ? maxIdx : minIdx;
+      
+      let tileToChange = null;
+
+      // Rule 1: Prioritize breaking sequences of 3+ identical levels
+      const pathTilesToTweak = pathTileRefs[pathToTweakIdx];
+      for (let i = 0; i <= pathTilesToTweak.length - 3; i++) {
+        const t1 = pathTilesToTweak[i];
+        const t2 = pathTilesToTweak[i+1];
+        const t3 = pathTilesToTweak[i+2];
+        if (t1.required_item_level === t2.required_item_level && t2.required_item_level === t3.required_item_level) {
+          tileToChange = t2; // Pick the middle tile
+          break;
+        }
       }
+
+      // Rule 2: If no sequences, fall back to changing the most impactful tile
+      if (!tileToChange) {
+        const sortedTiles = [...pathTilesToTweak].sort((a,b) => {
+          const la = a.required_item_level || 0;
+          const lb = b.required_item_level || 0;
+          return direction === -1 ? lb - la : la - lb; // desc for lowering, asc for raising
+        });
+        tileToChange = sortedTiles[0];
+      }
+
+      if (!tileToChange) {
+        iterations++; // Still increment to prevent infinite loops if no tile can be changed
+        continue;
+      }
+      
+      const oldLevel = tileToChange.required_item_level;
+      const maxLevel = (chainMaxMap[tileToChange.required_item_chain_color] || 12) - 1;
+      const newLevel = Math.max(2, Math.min(maxLevel, oldLevel + direction));
+
+      if (newLevel === oldLevel) {
+          iterations++; // Increment to avoid infinite loop on boundary conditions
+          continue;
+      }
+      
+      const costChange = stepCost(newLevel) - stepCost(oldLevel);
+      pathCosts[pathToTweakIdx] += costChange;
+      tileToChange.required_item_level = newLevel;
+      if(tileToChange.required_item_name){
+        const parts = tileToChange.required_item_name.split(' L');
+        tileToChange.required_item_name = `${parts[0]} L${newLevel}`;
+      }
+      
       iterations++;
     }
 
-    // Variety enforcement: no >2 identical IDs sequentially along each path
-    pathTileRefs.forEach((tilesArr, idxPath) => {
-      let prevLvl=null,run=0;
-      tilesArr.forEach(tile=>{
-        const lvl=tile.required_item_level;
-        if(lvl===prevLvl){run++;} else {run=1; prevLvl=lvl;}
-        if(run>2){
-          const prevLevel=tile.required_item_level;
-          let newLevel = prevLevel + (prevLevel>6?-1:1);
-          if(newLevel<2) newLevel=prevLevel+1; if(newLevel>12) newLevel=prevLevel-1;
-          tile.required_item_level=newLevel;
-          const parts=tile.required_item_name.split(' L');
-          tile.required_item_name=`${parts[0]} L${newLevel}`;
-          pathCosts[idxPath]+= stepCost(newLevel)-stepCost(prevLevel);
-          prevLvl=newLevel;
-          run=1;
-        }
-      });
-    });
-
-    // Ensure mix of levels (distribution rule)
-    pathTileRefs.forEach((tilesArr, idxPath) => {
-      if (tilesArr.length < 3) return;
-      const limit = Math.ceil(tilesArr.length * 0.4);
-      let counts = {};
-      tilesArr.forEach(t => { counts[t.required_item_level] = (counts[t.required_item_level] || 0) + 1; });
-      let dominantLevel = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
-      let distinct = Object.keys(counts).length;
-      let guard = 60;
-      while ((counts[dominantLevel] > limit || distinct < 3) && guard--) {
-        const cand = tilesArr.filter(t => t.required_item_level === Number(dominantLevel));
-        if (!cand.length) break;
-        const tile = cand[Math.floor(Math.random() * cand.length)];
-        const prev = tile.required_item_level;
-        let newLvl = prev + (prev>6?-1:1);
-        if (newLvl<2) newLvl=prev+1; if (newLvl>12) newLvl=prev-1;
-        tile.required_item_level=newLvl;
-        const parts = tile.required_item_name.split(' L');
-        tile.required_item_name=`${parts[0]} L${newLvl}`;
-        pathCosts[idxPath]+= stepCost(newLvl)-stepCost(prev);
-        counts[prev]--; counts[newLvl]=(counts[newLvl]||0)+1;
-        dominantLevel = Object.entries(counts).sort((a,b)=>b[1]-a[1])[0][0];
-        distinct = Object.keys(counts).length;
-      }
-    });
-
-    // Update analysis costs and flags
-    const newCosts = pathCosts.map(c=>Math.ceil(c));
-    const avg = newCosts.reduce((a,b)=>a+b,0)/newCosts.length;
-    const maxDiff = Math.max(...newCosts.map(c=>Math.abs(c-avg)));
-    const varPct = avg>0? (maxDiff/avg)*100 : 0;
-
-    newLayout.analysis = { ...newLayout.analysis, path_costs: newCosts, cost_variance: varPct, balanced_costs: varPct<=15 };
-    newLayout.analysis.all_paths = newLayout.analysis.all_paths.map((p,idx)=>({...p,cost:newCosts[idx]}));
+    // After balancing, perform a full and final recalculation of all analysis metrics
+    newLayout.analysis = recalculateAnalysis(newLayout);
     return newLayout;
   };
 
   const handleAutoBalanceAll = () => {
     if (generatedLayouts.length === 0) return;
-    const balanced = generatedLayouts.map(balanceSingleLayout);
+    let balancedCount = 0;
+    
+    const balanced = generatedLayouts.map(l => {
+        if (l.analysis.balanced_costs) {
+            return l; // Already balanced, no change
+        }
+        const newLayout = balanceSingleLayout(l);
+        if (newLayout.analysis.balanced_costs) {
+            balancedCount++;
+        }
+        return newLayout;
+    });
+    
     setGeneratedLayouts(balanced);
     analyzeGeneratedLayouts(balanced);
-    alert('Auto-balance completed for all layouts');
+    setLastBalanceCount(balancedCount);
+    setPreviewPage(0);
+    alert(`Auto-balance completed. ${balancedCount} layouts were successfully balanced.`);
+  };
+
+  const exportBalancedLayouts = () => {
+    const layoutsToExport = generatedLayouts.filter(l => l.analysis.balanced_costs);
+    const data = {
+      exported_at: new Date().toISOString(),
+      config: generationConfig,
+      layouts: layoutsToExport
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `balanced-layouts-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const filteredLayouts = getFilteredAndSortedLayouts();
+  const balancedLayouts = generatedLayouts.filter(l => l.analysis.balanced_costs);
   const totalPreviewPages = Math.ceil(filteredLayouts.length / PREVIEWS_PER_PAGE);
   const paginatedLayouts = filteredLayouts.slice(
     previewPage * PREVIEWS_PER_PAGE,
@@ -524,8 +557,14 @@ export default function LayoutGeneratorSimulator() {
           </Button>
           <Button onClick={exportLayouts} disabled={generatedLayouts.length === 0} variant="outline" className="flex items-center gap-2">
             <Download className="w-4 h-4" />
-            Export
+            Export All
           </Button>
+          {balancedLayouts.length > 0 && (
+            <Button onClick={exportBalancedLayouts} variant="secondary" className="flex items-center gap-2">
+                <Download className="w-4 h-4" />
+                Export Balanced
+            </Button>
+          )}
           <Button onClick={exportPageFeedback} disabled={paginatedLayouts.length === 0} variant="secondary" className="flex items-center gap-2" title="Export feedback for layouts on this page">
             <Download className="w-4 h-4" />
             Export Page Feedback
@@ -534,6 +573,11 @@ export default function LayoutGeneratorSimulator() {
             <TrendingUp className="w-4 h-4" />
             Auto Balance All
           </Button>
+          {lastBalanceCount !== null && (
+            <div className="text-sm text-green-600 font-medium p-2 bg-green-50 border border-green-200 rounded-md">
+              Balanced {lastBalanceCount} layouts.
+            </div>
+          )}
         </div>
       </div>
 
@@ -555,6 +599,9 @@ export default function LayoutGeneratorSimulator() {
         <TabsList>
           <TabsTrigger value="config">Configuration</TabsTrigger>
           <TabsTrigger value="analysis">Analysis</TabsTrigger>
+          {balancedLayouts.length > 0 && (
+            <TabsTrigger value="balanced">Balanced ({balancedLayouts.length})</TabsTrigger>
+          )}
           <TabsTrigger value="layouts">Generated Layouts</TabsTrigger>
           <TabsTrigger value="preview">Layout Preview</TabsTrigger>
         </TabsList>
@@ -944,6 +991,27 @@ export default function LayoutGeneratorSimulator() {
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        <TabsContent value="balanced" className="space-y-4">
+            <Card>
+                <CardHeader>
+                    <CardTitle>Balanced Layouts</CardTitle>
+                    <p className="text-muted-foreground">
+                        Showing all {balancedLayouts.length} layouts with a cost variance of 15% or less.
+                    </p>
+                </CardHeader>
+                <CardContent className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {balancedLayouts.map((layout, index) => (
+                        <LayoutPreview
+                            key={`balanced-${layout.id}-${index}`}
+                            layout={layout}
+                            analysis={layout.analysis}
+                            showDetails={true}
+                        />
+                    ))}
+                </CardContent>
+            </Card>
         </TabsContent>
 
         <TabsContent value="preview" className="space-y-4">

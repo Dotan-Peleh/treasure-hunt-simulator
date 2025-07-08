@@ -5,29 +5,31 @@ import PropTypes from 'prop-types';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useState, useMemo, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
+import { findAllPathsFromEntries } from '@/generation/pathAnalysis';
 
 export default function LayoutPreview({ layout, analysis, showDetails = true, compact = false }) {
-  // Local mutable copies so we can tweak levels without touching parent data
+  // Master state for the component's view of the layout and analysis
   const [localLayout, setLocalLayout] = useState(layout);
   const [localAnalysis, setLocalAnalysis] = useState(analysis);
-
-  // Sync when parent supplies a new layout
-  useEffect(() => {
-    setLocalLayout(layout);
-    setLocalAnalysis(analysis);
-    setSelectedPathIndex(null);
-  }, [layout, analysis]);
-
+  
+  // Selection state
   const [selectedPathIndex, setSelectedPathIndex] = useState(null);
-  // Local feedback state: { label: "good"|"bad"|null, comment: string, entryOverride: "r,c"|null }
+  const [selectedTileIndex, setSelectedTileIndex] = useState(null);
+
+  // Editing state
+  const [editingEntry, setEditingEntry] = useState(false);
+  const [flagMode, setFlagMode] = useState('feedback'); // 'feedback', 'entry', 'remove', 'rock'
+
+  // Feedback state
   const [feedback, setFeedback] = useState(() => {
+    // ... (feedback loading logic remains the same)
     const init = { label: null, comment: '', entryOverride: [], suppressFlags: [] };
     if (typeof window === 'undefined') return init;
     try {
       const stored = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
       const raw = stored[layout.id];
       if (!raw) return init;
-      if (typeof raw === 'string') return { ...init, label: raw }; // backward-compat
+      if (typeof raw === 'string') return { ...init, label: raw };
       if (raw && raw.entryOverride && !Array.isArray(raw.entryOverride)) {
          raw.entryOverride = raw.entryOverride ? [raw.entryOverride] : [];
       }
@@ -38,12 +40,134 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
     }
   });
 
+  // ========== Effects for State Synchronization ==========
+
+  // Sync with parent props
+  useEffect(() => {
+    setLocalLayout(layout);
+    setLocalAnalysis(analysis);
+    setSelectedPathIndex(null);
+    setSelectedTileIndex(null);
+  }, [layout, analysis]);
+
+  // Re-run full analysis when critical tile properties change
+  const entryPointsKey = useMemo(() => localLayout.tiles.filter(t => t.isEntryPoint).map(t => `${t.row},${t.col}`).sort().join(';'), [localLayout]);
+  const passableTilesKey = useMemo(() => localLayout.tiles.filter(t => ['semi_locked', 'bridge', 'key'].includes(t.tile_type)).map(t => `${t.row},${t.col}`).sort().join(';'), [localLayout]);
+  
+  useEffect(() => {
+    if (!localLayout.id) return;
+    rebuildAnalysisFromTiles();
+  }, [entryPointsKey, passableTilesKey, localLayout.id]);
+
+  // ========== Derived State (Memos) ==========
+  
+  const selectedPathKeys = useMemo(() => {
+    if (selectedPathIndex !== null && localAnalysis?.all_paths?.[selectedPathIndex]) {
+      return localAnalysis.all_paths[selectedPathIndex].path || [];
+    }
+    return [];
+  }, [selectedPathIndex, localAnalysis]);
+  
+  const selectedTile = useMemo(() => {
+    if (selectedTileIndex !== null) {
+      return localLayout.tiles[selectedTileIndex];
+    }
+    return null;
+  }, [selectedTileIndex, localLayout.tiles]);
+
+  const pathEntryMap = useMemo(() => {
+    if (!localAnalysis?.all_paths) return {};
+    const map = {};
+    localAnalysis.all_paths.forEach((p, idx) => {
+      if (p.path && p.path.length > 0) {
+        const key = p.path[0];
+        if (!map[key]) map[key] = [];
+        map[key].push(idx);
+      }
+    });
+    return map;
+  }, [localAnalysis]);
+
+  // ========== Core Functions ==========
+
+  const stepCost = (level) => Math.pow(2, level - 1);
+  const chainMaxMap = { orange: 12, blue: 10, green: 10 };
+
+  const recalculateAnalysisMetrics = (currentAnalysis, newPathCosts) => {
+    const newAnalysis = { ...currentAnalysis, path_costs: newPathCosts };
+    const avg = newPathCosts.length > 0 ? newPathCosts.reduce((a, b) => a + b, 0) / newPathCosts.length : 0;
+    const maxDiff = newPathCosts.length > 0 ? Math.max(...newPathCosts.map(c => Math.abs(c - avg))) : 0;
+    newAnalysis.cost_variance = avg > 0 ? (maxDiff / avg) * 100 : 0;
+    newAnalysis.balanced_costs = newAnalysis.cost_variance <= 15;
+    newAnalysis.shortest_path = newPathCosts.length > 0 ? Math.ceil(Math.min(...newPathCosts)) : 0;
+    newAnalysis.longest_path = newPathCosts.length > 0 ? Math.ceil(Math.max(...newPathCosts)) : 0;
+    newAnalysis.average_path = newPathCosts.length > 0 ? avg : 0;
+    if (newAnalysis.all_paths) {
+      newAnalysis.all_paths = newAnalysis.all_paths.map((p, idx) => ({ ...p, cost: newPathCosts[idx] || p.cost }));
+    }
+    return newAnalysis;
+  };
+
+  const rebuildAnalysisFromTiles = (layoutToAnalyze = localLayout) => {
+    if (!layoutToAnalyze.id) return;
+
+    const { tiles } = layoutToAnalyze;
+    const freshGrid = Array(9).fill(null).map(() => Array(7).fill('rock'));
+    tiles.forEach(t => {
+      if (t.row - 1 >= 0 && t.row - 1 < 9 && t.col - 1 >= 0 && t.col - 1 < 7) {
+        let type;
+        switch (t.tile_type) {
+          case 'semi_locked': type = 'path'; break;
+          case 'bridge': type = 'bridge'; break;
+          case 'key': type = 'key'; break;
+          default: type = t.tile_type; break;
+        }
+        freshGrid[t.row - 1][t.col - 1] = type;
+      }
+    });
+    const { all_paths } = findAllPathsFromEntries(freshGrid, tiles);
+    const path_costs = all_paths.map(p => p.cost);
+    
+    const newAnalysis = recalculateAnalysisMetrics({ ...localAnalysis, all_paths }, path_costs);
+    setLocalAnalysis(newAnalysis);
+  };
+  
+  // ========== Button Handlers ==========
+
+  const adjustSingleTileLevel = (delta) => {
+    if (selectedTileIndex === null) return;
+    const tile = localLayout.tiles[selectedTileIndex];
+    if (!tile || !tile.required_item_level) return;
+
+    const newTiles = [...localLayout.tiles];
+    const newTile = { ...tile };
+    const maxLevel = (chainMaxMap[newTile.required_item_chain_color] || 12) - 1;
+    const newLevel = Math.max(2, Math.min(maxLevel, newTile.required_item_level + delta));
+
+    if (newLevel === newTile.required_item_level) return;
+
+    newTile.required_item_level = newLevel;
+    if (newTile.required_item_name) {
+      const parts = newTile.required_item_name.split(' L');
+      newTile.required_item_name = `${parts[0]} L${newLevel}`;
+    }
+    newTiles[selectedTileIndex] = newTile;
+    
+    // Create a new layout object to ensure state updates correctly
+    const newLayout = { ...localLayout, tiles: newTiles };
+    setLocalLayout(newLayout);
+    
+    // Directly trigger a full recalculation after the state update.
+    // We wrap this in a timeout to ensure it runs after the state has been set.
+    setTimeout(() => rebuildAnalysisFromTiles(newLayout), 0);
+  };
+
   const persist = (next) => {
     try {
       const stored = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
       stored[layout.id] = next;
       localStorage.setItem('layoutFeedback', JSON.stringify(stored));
-    } catch {/* ignore */}
+    } catch {}
   };
 
   const updateFeedback = (patch) => {
@@ -54,62 +178,11 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
     });
   };
 
-  const [editingEntry, setEditingEntry] = useState(false);
-  const [flagMode, setFlagMode] = useState('feedback'); // 'feedback' | 'entry' | 'remove'
-
-  // Helper to adjust every tile level in the selected path by delta (+1 or -1)
-  const adjustPathLevels = (delta) => {
-    if (selectedPathIndex === null) return;
-    const path = localAnalysis?.all_paths?.[selectedPathIndex];
-    if (!path || !path.path) return;
-
-    const stepCost = (level) => Math.pow(2, level - 1);
-    const chainMaxMap = { orange: 12, blue: 8, green: 10 };
-
-    const newTiles = localLayout.tiles.map(t => ({ ...t }));
-    let newCost = 0;
-
-    path.path.forEach(coord => {
-      const [r, c] = coord.split(',').map(Number);
-      const idx = newTiles.findIndex(t => t.row === r + 1 && t.col === c + 1);
-      if (idx === -1) return;
-      const tile = { ...newTiles[idx] };
-      if (!tile.required_item_level) return;
-      const chainMax = chainMaxMap[tile.required_item_chain_color] || 12;
-      const newLevel = Math.min(chainMax - 1, Math.max(2, tile.required_item_level + delta));
-      tile.required_item_level = newLevel;
-      if (tile.required_item_name) {
-        const parts = tile.required_item_name.split(' L');
-        tile.required_item_name = `${parts[0]} L${newLevel}`;
-      }
-      newTiles[idx] = tile;
-      newCost += stepCost(newLevel);
-    });
-
-    // Update analysis cost arrays
-    const newAnalysis = { ...localAnalysis };
-    newAnalysis.path_costs = [...newAnalysis.path_costs];
-    newAnalysis.path_costs[selectedPathIndex] = Math.ceil(newCost);
-    if (newAnalysis.all_paths && newAnalysis.all_paths[selectedPathIndex]) {
-      newAnalysis.all_paths = [...newAnalysis.all_paths];
-      newAnalysis.all_paths[selectedPathIndex] = { ...newAnalysis.all_paths[selectedPathIndex], cost: Math.ceil(newCost) };
-    }
-
-    // Recompute cost variance & balance flag
-    const avg = newAnalysis.path_costs.reduce((a,b)=>a+b,0) / newAnalysis.path_costs.length;
-    const maxDiff = Math.max(...newAnalysis.path_costs.map(c=>Math.abs(c-avg)));
-    newAnalysis.cost_variance = avg>0 ? (maxDiff/avg)*100 : 0;
-    newAnalysis.balanced_costs = newAnalysis.cost_variance <= 15;
-
-    setLocalLayout({ ...localLayout, tiles: newTiles });
-    setLocalAnalysis(newAnalysis);
-  };
-
   const balancePathToAverage = () => {
     if (selectedPathIndex === null || !localAnalysis?.path_costs) return;
 
     const otherCosts = localAnalysis.path_costs.filter((_, idx) => idx !== selectedPathIndex);
-    if (otherCosts.length === 0) return; // Cannot balance a single path
+    if (otherCosts.length === 0) return;
 
     const targetCost = otherCosts.reduce((a, b) => a + b, 0) / otherCosts.length;
     let currentCost = localAnalysis.path_costs[selectedPathIndex];
@@ -125,29 +198,44 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
 
     if (pathTileRefs.length === 0) return;
 
-    const stepCost = (level) => Math.pow(2, level-1);
     let iterations = 0;
-
-    while (Math.abs(currentCost - targetCost) > 5 && iterations < 100) {
-        if (currentCost > targetCost) {
-            // Path is too expensive, lower the highest level
-            pathTileRefs.sort((a,b) => (b.required_item_level || 0) - (a.required_item_level || 0));
-            const tileToChange = pathTileRefs.find(t => t.required_item_level > 2);
-            if (!tileToChange) break;
-            currentCost -= stepCost(tileToChange.required_item_level) - stepCost(tileToChange.required_item_level - 1);
-            tileToChange.required_item_level--;
-        } else {
-            // Path is too cheap, raise the lowest level
-            pathTileRefs.sort((a,b) => (a.required_item_level || 0) - (b.required_item_level || 0));
-            const tileToChange = pathTileRefs.find(t => t.required_item_level < 12);
-            if (!tileToChange) break;
-            currentCost -= stepCost(tileToChange.required_item_level) - stepCost(tileToChange.required_item_level + 1);
-            tileToChange.required_item_level++;
+    
+    while (Math.abs(currentCost - targetCost) > 5 && iterations < 150) {
+        let tileToChange = null;
+        for (let i = 0; i <= pathTileRefs.length - 3; i++) {
+            const t1 = pathTileRefs[i], t2 = pathTileRefs[i+1], t3 = pathTileRefs[i+2];
+            if (t1.required_item_level === t2.required_item_level && t2.required_item_level === t3.required_item_level) {
+                tileToChange = t2;
+                break;
+            }
         }
+
+        const direction = (currentCost - targetCost) > 0 ? -1 : 1;
+
+        if (!tileToChange) {
+            const sorted = [...pathTileRefs].sort((a,b) => (direction === -1 ? b.required_item_level : a.required_item_level) - (direction === -1 ? a.required_item_level : b.required_item_level));
+            tileToChange = sorted[0];
+        }
+
+        if (!tileToChange) break; 
+
+        const oldLevel = tileToChange.required_item_level;
+        const newLevel = oldLevel + direction;
+        
+        const maxLevel = (chainMaxMap[tileToChange.required_item_chain_color] || 12) - 1;
+        const clampedLevel = Math.max(2, Math.min(maxLevel, newLevel));
+        
+        if (clampedLevel === oldLevel) {
+            iterations++;
+            continue;
+        }
+
+        const costChange = stepCost(clampedLevel) - stepCost(oldLevel);
+        currentCost += costChange;
+        tileToChange.required_item_level = clampedLevel;
         iterations++;
     }
 
-    // Update names and analysis
     newTiles.forEach(t => {
       if(t.required_item_name) {
         const parts = t.required_item_name.split(' L');
@@ -155,194 +243,165 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
       }
     });
 
-    const newAnalysis = { ...localAnalysis };
-    newAnalysis.path_costs = [...newAnalysis.path_costs];
-    newAnalysis.path_costs[selectedPathIndex] = Math.ceil(currentCost);
-    if (newAnalysis.all_paths && newAnalysis.all_paths[selectedPathIndex]) {
-      newAnalysis.all_paths = [...newAnalysis.all_paths];
-      newAnalysis.all_paths[selectedPathIndex] = { ...newAnalysis.all_paths[selectedPathIndex], cost: Math.ceil(currentCost) };
-    }
-
-    // Recompute cost variance & balance flag after balancing
-    const avg = newAnalysis.path_costs.reduce((a,b)=>a+b,0) / newAnalysis.path_costs.length;
-    const maxDiff = Math.max(...newAnalysis.path_costs.map(c=>Math.abs(c-avg)));
-    newAnalysis.cost_variance = avg>0 ? (maxDiff/avg)*100 : 0;
-    newAnalysis.balanced_costs = newAnalysis.cost_variance <= 15;
+    const newPathCosts = [...localAnalysis.path_costs];
+    newPathCosts[selectedPathIndex] = Math.ceil(currentCost);
 
     setLocalLayout({ ...localLayout, tiles: newTiles });
-    setLocalAnalysis(newAnalysis);
+    setLocalAnalysis(recalculateAnalysisMetrics(localAnalysis, newPathCosts));
   };
 
-  // Automatically balance ALL paths until variance ≤ 15 %
   const autoBalanceAcrossPaths = () => {
     if (!localAnalysis?.all_paths || localAnalysis.all_paths.length < 2) return;
 
     const newTiles = localLayout.tiles.map(t => ({ ...t }));
 
-    const getTileObj = (r, c) => newTiles.find(t => t.row === r + 1 && t.col === c + 1);
-    const stepCost = (lvl) => Math.pow(2, lvl - 1);
-
-    // Build arrays of tile references for quicker iteration per path
     const pathTileRefs = localAnalysis.all_paths.map(p =>
       p.path.map(coord => {
         const [r, c] = coord.split(',').map(Number);
-        return getTileObj(r, c);
+        return newTiles.find(t => t.row === r + 1 && t.col === c + 1);
       }).filter(t => t && t.required_item_level)
     );
 
-    const computeCosts = () => pathTileRefs.map(arr => arr.reduce((sum, t) => sum + stepCost(t.required_item_level), 0));
-
-    let pathCosts = computeCosts();
+    let pathCosts = pathTileRefs.map(arr => arr.reduce((sum, t) => sum + stepCost(t.required_item_level), 0));
     let iterations = 0;
     const MAX_ITER = 400;
 
     while (iterations < MAX_ITER) {
       const avg = pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length;
-      const maxDiff = Math.max(...pathCosts.map(c => Math.abs(c - avg)));
-      const variancePct = avg > 0 ? (maxDiff / avg) * 100 : 0;
-      if (variancePct <= 15) break;
-
-      // Determine which path to tweak
       let maxIdx = 0, minIdx = 0;
-      pathCosts.forEach((c, idx) => {
-        if (c > pathCosts[maxIdx]) maxIdx = idx;
-        if (c < pathCosts[minIdx]) minIdx = idx;
-      });
+      pathCosts.forEach((c, idx) => { if (c > pathCosts[maxIdx]) maxIdx = idx; if (c < pathCosts[minIdx]) minIdx = idx; });
+      
+      if (pathCosts[maxIdx] === pathCosts[minIdx]) break;
 
-      const lowerPath = (idx) => {
-        const tilesArr = pathTileRefs[idx].sort((a, b) => (b.required_item_level || 0) - (a.required_item_level || 0));
-        for (const tile of tilesArr) {
-          if (tile.required_item_level > 2) {
-            const prev = tile.required_item_level;
-            tile.required_item_level -= 1;
-            if (tile.required_item_name) {
-              const parts = tile.required_item_name.split(' L');
-              tile.required_item_name = `${parts[0]} L${tile.required_item_level}`;
-            }
-            pathCosts[idx] -= stepCost(prev) - stepCost(prev - 1);
-            return true;
-          }
+      const direction = (pathCosts[maxIdx] - avg > avg - pathCosts[minIdx]) ? -1 : 1;
+      const pathToTweakIdx = direction === -1 ? maxIdx : minIdx;
+      
+      let tileToChange = null;
+      const pathTilesToTweak = pathTileRefs[pathToTweakIdx];
+
+      // Rule 1: Prioritize breaking sequences of 3+ identical levels
+      for (let i = 0; i <= pathTilesToTweak.length - 3; i++) {
+        const t1 = pathTilesToTweak[i], t2 = pathTilesToTweak[i+1], t3 = pathTilesToTweak[i+2];
+        if (t1.required_item_level === t2.required_item_level && t2.required_item_level === t3.required_item_level) {
+          tileToChange = t2; // Pick the middle tile
+          break;
         }
-        return false;
-      };
-
-      const raisePath = (idx) => {
-        const tilesArr = pathTileRefs[idx].sort((a, b) => (a.required_item_level || 0) - (b.required_item_level || 0));
-        for (const tile of tilesArr) {
-          if (tile.required_item_level < 12) {
-            const prev = tile.required_item_level;
-            tile.required_item_level += 1;
-            if (tile.required_item_name) {
-              const parts = tile.required_item_name.split(' L');
-              tile.required_item_name = `${parts[0]} L${tile.required_item_level}`;
-            }
-            pathCosts[idx] += stepCost(prev + 1) - stepCost(prev);
-            return true;
-          }
-        }
-        return false;
-      };
-
-      // Decide which adjustment to perform
-      if (pathCosts[maxIdx] - avg > avg - pathCosts[minIdx]) {
-        if (!lowerPath(maxIdx)) break;
-      } else {
-        if (!raisePath(minIdx)) break;
       }
 
+      // Rule 2: If no sequences, fall back to changing the most impactful tile
+      if (!tileToChange) {
+        const sortedTiles = [...pathTilesToTweak].sort((a,b) => (direction === -1 ? b.required_item_level - a.required_item_level : a.required_item_level - b.required_item_level));
+        tileToChange = sortedTiles[0];
+      }
+
+      if (!tileToChange) {
+        iterations++;
+        continue;
+      }
+      
+      const oldLevel = tileToChange.required_item_level;
+      const maxLevel = (chainMaxMap[tileToChange.required_item_chain_color] || 12) - 1;
+      const newLevel = Math.max(2, Math.min(maxLevel, oldLevel + direction));
+
+      if (newLevel === oldLevel) {
+          iterations++;
+          continue;
+      }
+      
+      const costChange = stepCost(newLevel) - stepCost(oldLevel);
+      pathCosts[pathToTweakIdx] += costChange;
+      tileToChange.required_item_level = newLevel;
+      if(tileToChange.required_item_name){
+        const parts = tileToChange.required_item_name.split(' L');
+        tileToChange.required_item_name = `${parts[0]} L${newLevel}`;
+      }
+      
       iterations++;
     }
-
-    // Enforce variety: no more than 2 identical item IDs in a row per path
-    const enforceVariety = () => {
-      localAnalysis.all_paths.forEach((p, idx) => {
-        const tilesArr = pathTileRefs[idx];
-        let prevLvl = null, run = 0;
-        tilesArr.forEach(tile => {
-          const lvl = tile.required_item_level;
-          if (lvl === prevLvl) {
-            run += 1;
-          } else {
-            run = 1; prevLvl = lvl;
-          }
-          if (run > 2) {
-            // tweak level by +/-1 to break repetition, clamp 2-12
-            const prevLevel = tile.required_item_level;
-            let newLevel = prevLevel + (prevLevel > 6 ? -1 : 1);
-            if (newLevel < 2) newLevel = prevLevel + 1; if (newLevel > 12) newLevel = prevLevel - 1;
-            tile.required_item_level = newLevel;
-            const parts = tile.required_item_name.split(' L');
-            tile.required_item_name = `${parts[0]} L${newLevel}`;
-            pathCosts[idx] += stepCost(newLevel) - stepCost(prevLevel);
-            prevLvl = newLevel;
-            run = 1;
-          }
-        });
-      });
-    };
-
-    enforceVariety();
-
-    const enforceLevelDistribution = () => {
-      pathTileRefs.forEach((tilesArr, idx) => {
-        if (tilesArr.length < 3) return;
-        const limit = Math.ceil(tilesArr.length * 0.4); // 40% max same level
-        let counts = {};
-        tilesArr.forEach(t => { counts[t.required_item_level] = (counts[t.required_item_level] || 0) + 1; });
-        let dominantLevel = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
-        let distinct = Object.keys(counts).length;
-        let safety = 60;
-        while ((counts[dominantLevel] > limit || distinct < 3) && safety--) {
-          const candidates = tilesArr.filter(t => t.required_item_level === Number(dominantLevel));
-          if (!candidates.length) break;
-          const tile = candidates[Math.floor(Math.random() * candidates.length)];
-          const prevLevel = tile.required_item_level;
-          let newLevel = prevLevel + (prevLevel > 6 ? -1 : 1);
-          if (newLevel < 2) newLevel = prevLevel + 1; if (newLevel > 12) newLevel = prevLevel - 1;
-          tile.required_item_level = newLevel;
-          const parts = tile.required_item_name.split(' L');
-          tile.required_item_name = `${parts[0]} L${newLevel}`;
-          pathCosts[idx] += stepCost(newLevel) - stepCost(prevLevel);
-          // update counts
-          counts[prevLevel]--; counts[newLevel] = (counts[newLevel] || 0) + 1;
-          dominantLevel = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
-          distinct = Object.keys(counts).length;
-        }
-      });
-    };
-
-    enforceLevelDistribution();
-
-    // Recompute analysis path costs after variety tweak
-    const newPathCosts = pathCosts.map(c => Math.ceil(c));
-    const avg = newPathCosts.reduce((a, b) => a + b, 0) / newPathCosts.length;
-    const maxDiff = Math.max(...newPathCosts.map(c => Math.abs(c - avg)));
-    const costVar = avg > 0 ? (maxDiff / avg) * 100 : 0;
-
-    const newAnalysis = { ...localAnalysis, path_costs: newPathCosts, cost_variance: costVar, balanced_costs: costVar <= 15 };
-    if (newAnalysis.all_paths) {
-      newAnalysis.all_paths = newAnalysis.all_paths.map((p, idx) => ({ ...p, cost: newPathCosts[idx] }));
-    }
-
+    
     setLocalLayout({ ...localLayout, tiles: newTiles });
-    setLocalAnalysis(newAnalysis);
+    setLocalAnalysis(recalculateAnalysisMetrics(localAnalysis, pathCosts.map(c => Math.ceil(c))));
+  };
+
+  const addEntryAndRecalc = (coord, tileObj) => {
+      const newTiles = localLayout.tiles.map(t => {
+          if (t.id !== tileObj.id) return t;
+          const newTile = { ...t, isEntryPoint: true, discovered: true };
+          const existingEntryLevels = localLayout.tiles.filter(et => et.isEntryPoint && et.required_item_level).map(et => et.required_item_level);
+          if (existingEntryLevels.length > 0) {
+              const minLevel = Math.min(...existingEntryLevels);
+              const adjustment = Math.floor(Math.random() * 3) - 1;
+              let targetLevel = minLevel + adjustment;
+              const maxLevel = (chainMaxMap[newTile.required_item_chain_color] || 12) - 1;
+              targetLevel = Math.max(2, Math.min(targetLevel, maxLevel));
+              newTile.required_item_level = targetLevel;
+              if (newTile.required_item_name) {
+                  const parts = newTile.required_item_name.split(' L');
+                  newTile.required_item_name = `${parts[0]} L${targetLevel}`;
+              }
+          }
+          return newTile;
+      });
+      setLocalLayout(prev => ({ ...prev, tiles: newTiles }));
+  };
+
+  const removeEntryAndRecalc = (coord, tileObj) => {
+      if (!tileObj.isEntryPoint) return;
+      const newTiles = localLayout.tiles.map(t => (t.id === tileObj.id) ? { ...t, isEntryPoint: false } : t);
+      setLocalLayout(prev => ({ ...prev, tiles: newTiles }));
+  };
+
+  const placeRockAndRecalc = (tileObj) => {
+    if (tileObj.tile_type === 'rock') return;
+    const newTiles = localLayout.tiles.map(t => (t.id === tileObj.id) ? { ...t, tile_type: 'rock', isEntryPoint: false } : t);
+    setLocalLayout(prev => ({ ...prev, tiles: newTiles }));
+  };
+
+  const adjustPathLevels = (delta) => {
+    if (selectedPathIndex === null) return;
+    const path = localAnalysis?.all_paths?.[selectedPathIndex];
+    if (!path || !path.path) return;
+
+    const newTiles = localLayout.tiles.map(t => {
+      if (!path.path.includes(`${t.row - 1},${t.col - 1}`)) return t;
+      if (!t.required_item_level) return t;
+      
+      const newTile = { ...t };
+      const maxLevel = (chainMaxMap[newTile.required_item_chain_color] || 12) - 1;
+      const newLevel = Math.max(2, Math.min(maxLevel, newTile.required_item_level + delta));
+      newTile.required_item_level = newLevel;
+      if (newTile.required_item_name) {
+        const parts = newTile.required_item_name.split(' L');
+        newTile.required_item_name = `${parts[0]} L${newLevel}`;
+      }
+      return newTile;
+    });
+
+    const newCost = path.path.reduce((sum, coord) => {
+        const [r, c] = coord.split(',').map(Number);
+        const tile = newTiles.find(t => t.row === r + 1 && t.col === c + 1);
+        return sum + (tile?.required_item_level ? stepCost(tile.required_item_level) : 0);
+    }, 0);
+
+    const newPathCosts = [...localAnalysis.path_costs];
+    newPathCosts[selectedPathIndex] = Math.ceil(newCost);
+    
+    setLocalLayout({ ...localLayout, tiles: newTiles });
+    setLocalAnalysis(recalculateAnalysisMetrics(localAnalysis, newPathCosts));
   };
 
   const exportFeedback = () => {
     try {
-      // Retrieve stored feedback for all layouts (needed to keep thumbs up/down etc.)
       const all = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
       const thisLayoutFeedback = all[layout.id] || feedback;
 
       const data = {
         exported_at: new Date().toISOString(),
-        layouts: [
-          {
+        layouts: [{
             ...layout,
             analysis: analysis || null,
             feedback: thisLayoutFeedback
-          }
-        ]
+        }]
       };
 
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -354,179 +413,19 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-    } catch {/* ignore */}
+    } catch {}
   };
 
-  // When a new layout is rendered, reload its stored feedback (or blank) and reset UI state
-  useEffect(() => {
-    const init = { label: null, comment: '', entryOverride: [], suppressFlags: [] };
-    try {
-      const stored = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
-      const raw = stored[layout.id];
-      const fresh = raw
-        ? (typeof raw === 'string' ? { ...init, label: raw } : { ...init, ...raw })
-        : init;
-      setFeedback(fresh);
-    } catch {
-      setFeedback(init);
-    }
-    setSelectedPathIndex(null);
-    setEditingEntry(false);
-  }, [layout.id]);
-
-  // Map entry-point coordinates (first key in each path) → path index
-  const pathEntryMap = useMemo(() => {
-    if (!localAnalysis?.all_paths) return {};
-    const map = {};
-    localAnalysis.all_paths.forEach((p, idx) => {
-      if (p.path && p.path.length > 0) {
-        const key = p.path[0];
-        if (!map[key]) map[key] = [];
-        map[key].push(idx);
-      }
-    });
-    return map;
-  }, [localAnalysis]);
-
-  const selectedPathKeys = useMemo(() => {
-    if (!localAnalysis?.all_paths) return [];
-    if (selectedPathIndex !== null) {
-      return localAnalysis.all_paths[selectedPathIndex]?.path || [];
-    }
-    return [];
-  }, [selectedPathIndex, localAnalysis]);
-
-  const stepCostGlobal = (level) => Math.pow(2, level - 1);
-
-  // Add helper to recompute analysis completely from current tiles
-  const rebuildAnalysisFromTiles = () => {
-      const { findAllPathsFromEntries } = require('@/generation/pathAnalysis');
-      // rebuild grid snapshot to reflect current tiles
-      const freshGrid = Array(9).fill(null).map(()=>Array(7).fill(null));
-      localLayout.tiles.forEach(t=>{ if(t.row-1>=0&&t.row-1<9&&t.col-1>=0&&t.col-1<7) freshGrid[t.row-1][t.col-1]=t; });
-      const { all_paths } = findAllPathsFromEntries(freshGrid, localLayout.tiles);
-      const path_costs_all = all_paths.map(p=>Math.ceil(p.cost));
-      const successful = all_paths.filter(p=>p.reachedKey!==false);
-      const successful_costs = successful.map(p=>p.cost);
-      const avg = successful_costs.length? successful_costs.reduce((a,b)=>a+b,0)/successful_costs.length:0;
-      const maxDiff = successful_costs.length? Math.max(...successful_costs.map(c=>Math.abs(c-avg))):0;
-      const newAnalysis = { ...localAnalysis };
-      newAnalysis.all_paths = all_paths;
-      newAnalysis.path_costs = path_costs_all;
-      newAnalysis.shortest_path = successful_costs.length? Math.min(...successful_costs):0;
-      newAnalysis.longest_path  = successful_costs.length? Math.max(...successful_costs):0;
-      newAnalysis.average_path  = avg;
-      newAnalysis.cost_variance = avg>0? (maxDiff/avg)*100:0;
-      newAnalysis.balanced_costs = newAnalysis.cost_variance<=15;
-      setLocalAnalysis(newAnalysis);
-      setSelectedPathIndex(null);
-  };
-
-  const addEntryAndRecalc = (coord, tileObj) => {
-      // If this coord already entry, skip
-      if (tileObj.isEntryPoint) return;
-      tileObj.isEntryPoint = true;
-      tileObj.discovered = true;
-
-      // Find existing path containing coord
-      const existingPathIdx = localAnalysis.all_paths.findIndex(p => p.path.includes(coord));
-      let newPathCoords = [];
-      if (existingPathIdx !== -1) {
-        const fullPath = localAnalysis.all_paths[existingPathIdx].path;
-        const sliceStart = fullPath.indexOf(coord);
-        newPathCoords = fullPath.slice(sliceStart);
-      } else {
-        // compute via BFS over passable tiles
-        const rows = 9, cols = 7;
-        const passable = (r,cx) => {
-          const t = grid[r][cx];
-          if(!t) return false;
-          return ['semi_locked','key','free','generator_green','generator_mixed'].includes(t.tile_type);
-        };
-        const [sr,sc] = coord.split(',').map(Number);
-        let keyPos=null;
-        for(let r=0;r<rows;r++){ for(let c2=0;c2<cols;c2++){ if(grid[r][c2]?.tile_type==='key'){keyPos=[r,c2];break;} } if(keyPos) break;}
-        if(!keyPos) return;
-        const queue=[[sr,sc]];
-        const prevMap = new Map();
-        prevMap.set(`${sr},${sc}`, null);
-        const dirs=[[1,0],[-1,0],[0,1],[0,-1]];
-        while(queue.length){
-          const [r,cx] = queue.shift();
-          if(r===keyPos[0] && cx===keyPos[1]){
-            // build path
-            const pathRev=[];
-            let cur=`${r},${cx}`;
-            while(cur){ pathRev.push(cur); cur=prevMap.get(cur);} 
-            newPathCoords=pathRev.reverse();
-            break;
-          }
-          for(const [dr,dc] of dirs){
-            const nr=r+dr,nc=cx+dc;
-            if(nr<0||nr>=rows||nc<0||nc>=cols) continue;
-            if(!passable(nr,nc)) continue;
-            const key=`${nr},${nc}`;
-            if(prevMap.has(key)) continue;
-            prevMap.set(key,`${r},${cx}`);
-            queue.push([nr,nc]);
-          }
-        }
-        if(newPathCoords.length===0) return; // no path
-      }
-
-      // compute cost
-      let cost = 0;
-      newPathCoords.forEach(c=>{
-        const [r,cx]=c.split(',').map(Number);
-        const t = localLayout.tiles.find(t2=>t2.row===r+1&&t2.col===cx+1);
-        if(t&&t.required_item_level) cost += stepCostGlobal(t.required_item_level);
-      });
-      const newPathObj = { path: newPathCoords, cost: Math.ceil(cost) };
-
-      const newAnalysis = { ...localAnalysis };
-      newAnalysis.all_paths = [...newAnalysis.all_paths, newPathObj];
-      newAnalysis.path_costs = [...newAnalysis.path_costs, Math.ceil(cost) ];
-
-      // recompute variance
-      const avg = newAnalysis.path_costs.reduce((a,b)=>a+b,0)/newAnalysis.path_costs.length;
-      const maxDiff = Math.max(...newAnalysis.path_costs.map(c=>Math.abs(c-avg)));
-      newAnalysis.cost_variance = avg>0 ? (maxDiff/avg)*100 : 0;
-      newAnalysis.balanced_costs = newAnalysis.cost_variance <= 15;
-      newAnalysis.shortest_path = newAnalysis.path_costs.length>0? Math.min(...newAnalysis.path_costs) : 0;
-      newAnalysis.longest_path  = newAnalysis.path_costs.length>0? Math.max(...newAnalysis.path_costs) : 0;
-      newAnalysis.average_path  = newAnalysis.path_costs.length>0? (newAnalysis.path_costs.reduce((a,b)=>a+b,0)/newAnalysis.path_costs.length) : 0;
-
-      setLocalAnalysis(newAnalysis);
-      setLocalLayout({...localLayout, tiles:[...localLayout.tiles]});
-      // pathEntryMap etc will update via memo
-  };
-
-  const removeEntryAndRecalc = (coord,tileObj) => {
-      if(!tileObj.isEntryPoint) return;
-      tileObj.isEntryPoint=false;
-      // rebuild analysis from scratch
-      rebuildAnalysisFromTiles();
-      setLocalLayout({...localLayout, tiles:[...localLayout.tiles]});
-  };
+  // ========== JSX Rendering ==========
 
   if (!localLayout || !localLayout.tiles) {
-    return (
-      <Card>
-        <CardContent className="pt-6">
-          <p className="text-center text-muted-foreground">No layout data available</p>
-        </CardContent>
-      </Card>
-    );
+    return <Card><CardContent className="pt-6"><p>No layout data.</p></CardContent></Card>;
   }
 
-  // Convert tiles to grid for visualization
   const grid = Array(9).fill(null).map(() => Array(7).fill(null));
-  
   localLayout.tiles.forEach(tile => {
-    const row = tile.row - 1;
-    const col = tile.col - 1;
-    if (row >= 0 && row < 9 && col >= 0 && col < 7) {
-      grid[row][col] = tile;
+    if (tile.row - 1 >= 0 && tile.row - 1 < 9 && tile.col - 1 >= 0 && tile.col - 1 < 7) {
+      grid[tile.row - 1][tile.col - 1] = tile;
     }
   });
 
@@ -630,33 +529,44 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                         }
                     } else if(flagMode==='remove'){
                         if(tile){ removeEntryAndRecalc(coord,tile);} 
+                    } else if (flagMode === 'rock') {
+                        if (tile) { placeRockAndRecalc(tile); }
                     } else {
                         // feedback mode (blue flag) behaves as before
-                        if (tile?.isEntryPoint) {
-                          const sup = Array.isArray(feedback.suppressFlags) ? [...feedback.suppressFlags] : [];
-                          const si = sup.indexOf(coord);
-                          if (si === -1) sup.push(coord); else sup.splice(si,1);
-                          updateFeedback({ suppressFlags: sup });
-                        } else {
-                          const arr = Array.isArray(feedback.entryOverride) ? [...feedback.entryOverride] : [];
-                          const idx = arr.indexOf(coord);
-                          if (idx === -1) arr.push(coord); else arr.splice(idx,1);
-                          updateFeedback({ entryOverride: arr });
+                    if (tile?.isEntryPoint) {
+                      const sup = Array.isArray(feedback.suppressFlags) ? [...feedback.suppressFlags] : [];
+                      const si = sup.indexOf(coord);
+                      if (si === -1) sup.push(coord); else sup.splice(si,1);
+                      updateFeedback({ suppressFlags: sup });
+                    } else {
+                      const arr = Array.isArray(feedback.entryOverride) ? [...feedback.entryOverride] : [];
+                      const idx = arr.indexOf(coord);
+                      if (idx === -1) arr.push(coord); else arr.splice(idx,1);
+                      updateFeedback({ entryOverride: arr });
                         }
                     }
                     setEditingEntry(false);
                     return;
                   }
+
+                  // New Selection Logic
+                  const tileIndex = (rowIndex * 7) + colIndex;
                   if (pathEntryMap[coord]) {
                     const pathsForEntry = pathEntryMap[coord];
                     const currentIdxInList = pathsForEntry.indexOf(selectedPathIndex);
                     const nextIdx = currentIdxInList === -1 || currentIdxInList === pathsForEntry.length - 1 ? 0 : currentIdxInList + 1;
                     setSelectedPathIndex(pathsForEntry[nextIdx]);
+                    setSelectedTileIndex(null); // Clear single tile selection when a path is selected
+                  } else {
+                    // It's not an entry point, so treat it as a single tile selection
+                    setSelectedTileIndex(tileIndex);
+                    setSelectedPathIndex(null); // Clear path selection
                   }
                 }}
                 className={`${compact ? 'w-7 h-7' : 'w-8 h-8'} relative border rounded flex items-center justify-center text-xs font-medium transition-all cursor-pointer
                 ${getTileColor(tile)}
-                ${selectedPathKeys.includes(coord) ? 'ring-2 ring-offset-1 ring-red-500' : (tile?.discovered ? 'ring-2 ring-blue-400' : '')}
+                ${selectedPathKeys.includes(coord) ? 'ring-2 ring-offset-1 ring-red-500' : ''}
+                ${selectedTileIndex === (rowIndex * 7) + colIndex ? 'ring-2 ring-blue-500' : ''}
                 ${editingEntry ? 'animate-pulse' : ''}`}
                 title={tile ? `${tile.tile_type}${tile.required_item_name ? ` - ${tile.required_item_name}` : ''}` : 'Empty'}
               >
@@ -707,11 +617,12 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                 title="Edit flags"
                 onClick={() => {
                   if(editingEntry){setEditingEntry(false);} else {setFlagMode('feedback');setEditingEntry(true);} }}
-                className={`px-2 py-0.5 text-xs rounded border ${editingEntry ? 'bg-blue-100 border-blue-400' : 'border-gray-300'}`}>✏️</button>
+               className={`px-2 py-0.5 text-xs rounded border ${editingEntry ? 'bg-blue-100 border-blue-400' : 'border-gray-300'}`}>✏️</button>
              {editingEntry && (
                <div className="flex gap-1 ml-1">
                  <Button size="xs" variant={flagMode==='entry'?'secondary':'outline'} onClick={()=>setFlagMode('entry')}>🚩 Red</Button>
                  <Button size="xs" variant={flagMode==='feedback'?'secondary':'outline'} onClick={()=>setFlagMode('feedback')}>🏳️ Blue</Button>
+                 <Button size="xs" variant={flagMode==='rock'?'secondary':'outline'} onClick={()=>setFlagMode('rock')}>🪨 Rock</Button>
                  <Button size="xs" variant={flagMode==='remove'?'secondary':'outline'} onClick={()=>setFlagMode('remove')}>❌ Remove</Button>
                </div>
              )}
@@ -746,7 +657,7 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
               </>
             )}
             <div className="relative">
-              {boardGrid}
+            {boardGrid}
               {selectedPathIndex !== null && (
                 <div className="absolute -top-5 right-0 bg-white border rounded px-2 py-0.5 text-xs font-semibold shadow">
                   Cost: {localAnalysis.path_costs[selectedPathIndex]}
@@ -811,7 +722,10 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                 <div className="flex justify-between font-semibold">
                   <span
                     className="cursor-pointer hover:underline"
-                    onClick={() => setSelectedPathIndex(null)}
+                    onClick={() => {
+                        setSelectedPathIndex(null);
+                        setSelectedTileIndex(null);
+                    }}
                   >
                     Total Strategic Paths:
                   </span>
@@ -835,6 +749,12 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                 <div className="flex gap-2 pt-2">
                   <Button size="sm" variant="secondary" onClick={autoBalanceAcrossPaths}>Auto Balance Paths</Button>
                 </div>
+                {selectedTile && selectedTile.required_item_level && (
+                  <div className="flex gap-2 pt-2">
+                    <Button size="sm" variant="outline" onClick={() => adjustSingleTileLevel(1)}>Lvl +1</Button>
+                    <Button size="sm" variant="outline" onClick={() => adjustSingleTileLevel(-1)}>Lvl -1</Button>
+                  </div>
+                )}
                 {selectedPathIndex !== null && (
                   <div className="flex gap-2 pt-2">
                     <Button size="sm" variant="outline" onClick={() => adjustPathLevels(1)}>Raise +1</Button>
@@ -888,7 +808,7 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                       }
 
                       setLocalLayout({ ...localLayout, tiles: newTiles });
-                      setLocalAnalysis(newAnalysis);
+                      setLocalAnalysis(recalculateAnalysisMetrics(localAnalysis, newCosts));
                     }}>
                       Balance ≤15%
                     </Button>

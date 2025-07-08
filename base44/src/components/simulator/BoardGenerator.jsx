@@ -56,6 +56,42 @@ export const generateBoardLayout = (config) => {
         }
     }
 
+    // --- FAULTY START INJECTION ---
+    const faultyStartCount = 1 + Math.floor(Math.random() * 2); // 1 or 2 faulty starts
+    const potentialStartPoints = [];
+    // Tiles just above the 3x2 start area
+    for (let c = 0; c < 3; c++) potentialStartPoints.push({ r: 6, c }); 
+    // Tiles to the right of the start area
+    potentialStartPoints.push({ r: 7, c: 3 });
+    potentialStartPoints.push({ r: 8, c: 3 });
+    
+    // Shuffle to pick random spots
+    potentialStartPoints.sort(() => Math.random() - 0.5);
+
+    let createdFaultyStarts = 0;
+    for (const pos of potentialStartPoints) {
+        if (createdFaultyStarts >= faultyStartCount) break;
+
+        // Draw a short vertical branch upwards from the start area's perimeter
+        const length = 1 + Math.floor(Math.random() * 2); // 1 or 2 tiles
+        let canBuild = true;
+        for(let i=0; i < length; i++) {
+            const r = pos.r - i;
+            if (r < 0 || grid[r][pos.c] !== 'rock') {
+                canBuild = false;
+                break;
+            }
+        }
+
+        if (canBuild) {
+            for(let i=0; i < length; i++) {
+                // Assign to path1 so it's processed as a standard semi_locked tile
+                grid[pos.r - i][pos.c] = 'path1';
+            }
+            createdFaultyStarts++;
+        }
+    }
+
     // 2. Nuke all existing keys to ensure only one is placed.
     for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
@@ -80,8 +116,9 @@ export const generateBoardLayout = (config) => {
     // 5. Run accessibility validation AFTER the start area and key have been defined
     grid = validateAndRepairLayout(grid);
     
-    // 6. Place generators in fixed positions within the start area
-    grid[8][0] = 'generator_mixed';
+    // 6. Place three single-chain generators in fixed positions
+    grid[8][0] = 'generator_orange';
+    grid[8][1] = 'generator_blue';
     grid[8][2] = 'generator_green';
 
     // Place extra free tiles by converting some rocks
@@ -139,7 +176,7 @@ export const generateBoardLayout = (config) => {
     
     // Ensure we have the 3 standard chains with correct levels
     const orangeChain = item_chains.find(c => c.color === 'orange') || { chain_name: 'Energy Cell', levels: 12, color: 'orange' };
-    const blueChain = item_chains.find(c => c.color === 'blue') || { chain_name: 'Data Chip', levels: 8, color: 'blue' };
+    const blueChain = item_chains.find(c => c.color === 'blue') || { chain_name: 'Data Chip', levels: 10, color: 'blue' };
     const greenChain = item_chains.find(c => c.color === 'green') || { chain_name: 'Bio Fuel', levels: 10, color: 'green' };
     
     // Collect all path tiles together for processing
@@ -174,8 +211,11 @@ export const generateBoardLayout = (config) => {
             } else if (cellType === 'start' || cellType === 'free') {
                 tile = createTile(r + 1, c + 1, 'free', true);
                 tile.discovered = true;
-            } else if (cellType === 'generator_mixed') {
-                tile = createTile(r + 1, c + 1, 'free', true, { type: 'generator', chains: [blueChain, orangeChain], isStart: true });
+            } else if (cellType === 'generator_orange') {
+                tile = createTile(r + 1, c + 1, 'free', true, { type: 'generator', chains: [orangeChain], isStart: true });
+                tile.discovered = true;
+            } else if (cellType === 'generator_blue') {
+                tile = createTile(r + 1, c + 1, 'free', true, { type: 'generator', chains: [blueChain], isStart: true });
                 tile.discovered = true;
             } else if (cellType === 'generator_green') {
                 tile = createTile(r + 1, c + 1, 'free', true, { type: 'generator', chains: [greenChain], isStart: true });
@@ -209,8 +249,8 @@ export const generateBoardLayout = (config) => {
         let prevLevel = 2;
 
         sortedTiles.forEach((pathTile, index) => {
-            // Randomly select a chain for each tile to improve variance
-            const selectedChain = allChains[Math.floor(Math.random() * allChains.length)];
+            // Cycle through chains to ensure variety instead of pure random
+            const selectedChain = allChains[index % allChains.length];
             
             // PROGRESSIVE DIFFICULTY: Calculate level based on position in path
             const progressRatio = index / (sortedTiles.length - 1); // 0 at start, 1 at end
@@ -257,6 +297,7 @@ export const generateBoardLayout = (config) => {
     // ---------------- AUTO BALANCE ACROSS PATHS -----------------
     const getTileObj = (r,c) => tiles.find(t=>t.row===r+1 && t.col===c+1);
     const stepCost = lvl => Math.pow(2, lvl-1);
+    const chainMaxMap = { orange: 12, blue: 10, green: 10 };
 
     const computePathCosts = () => {
         return nonEmptyPaths.map(p => {
@@ -290,7 +331,10 @@ export const generateBoardLayout = (config) => {
             for(const tileRef of tilesSorted){
                 const obj=getTileObj(tileRef.r,tileRef.c);
                 if(!obj||!obj.required_item_level) continue;
-                const newLevel = Math.min(12, Math.max(2, obj.required_item_level + direction));
+
+                const maxLevel = (chainMaxMap[obj.required_item_chain_color] || 12) - 1;
+                const newLevel = Math.min(maxLevel, Math.max(2, obj.required_item_level + direction));
+
                 if(newLevel===obj.required_item_level) continue;
                 // apply
                 const prevCost = stepCost(obj.required_item_level);
@@ -347,9 +391,138 @@ export const generateBoardLayout = (config) => {
         }
     });
 
+    // Run Entry Point Level Harmonization BEFORE the final path analysis
+    const entryPointTiles = tiles.filter(t => t.isEntryPoint && t.required_item_level);
+    if (entryPointTiles.length > 1) {
+        const minLevel = Math.min(...entryPointTiles.map(t => t.required_item_level));
+        entryPointTiles.forEach(tile => {
+            if (tile.required_item_level > minLevel + 1) {
+                const adjustment = Math.floor(Math.random() * 2);
+                const newLevel = minLevel + adjustment;
+                tile.required_item_level = newLevel;
+                if (tile.required_item_name) {
+                    const parts = tile.required_item_name.split(' L');
+                    tile.required_item_name = `${parts[0]} L${newLevel}`;
+                }
+            }
+        });
+    }
+
     const totalPathTiles = nonEmptyPaths.reduce((sum, path) => sum + path.length, 0) + bridgeTiles.length;
     
-    const { all_paths } = findAllPathsFromEntries(grid, tiles);
+    // --- Connectivity Validation ---
+    // Ensure every path has at least one route to the key.
+    let analysisResult = findAllPathsFromEntries(grid, tiles);
+    const reachableTiles = new Set(analysisResult.all_paths.flatMap(p => p.path));
+
+    const pathsWithRoutes = new Set(analysisResult.all_paths.map(p => {
+        const firstTileCoord = p.path[0];
+        const tile = tiles.find(t => `${t.row - 1},${t.col - 1}` === firstTileCoord);
+        // Find which raw path this tile belongs to
+        for(let i=0; i < nonEmptyPaths.length; i++) {
+            if (nonEmptyPaths[i].some(pt => `${pt.r},${pt.c}` === firstTileCoord)) {
+                return i;
+            }
+        }
+        return -1;
+    }));
+    
+    if (pathsWithRoutes.size < nonEmptyPaths.length) {
+        // Find the disconnected path(s) and attempt to repair one.
+        for (let i = 0; i < nonEmptyPaths.length; i++) {
+            if (!pathsWithRoutes.has(i)) {
+                const path = nonEmptyPaths[i];
+                // Find tile on this path closest to the key
+                let closestTile = null;
+                let min_dist = Infinity;
+                
+                const key_r = parseInt(grid.findIndex(row => row.includes('key')));
+                const key_c = parseInt(grid[key_r].findIndex(c => c === 'key'));
+
+                path.forEach(tile => {
+                    const dist = Math.abs(tile.r - key_r) + Math.abs(tile.c - key_c);
+                    if (dist < min_dist) {
+                        min_dist = dist;
+                        closestTile = tile;
+                    }
+                });
+                
+                if (closestTile) {
+                    const layoutManager = new LayoutManager(grid, {r: key_r, c: key_c});
+                    // STAGE 1: Attempt direct connection to the key
+                    layoutManager.drawPath({r: closestTile.r, c: closestTile.c}, {r: key_r, c: key_c}, 'bridge');
+                    
+                    // Re-run analysis to see if it's fixed
+                    let tempAnalysis = findAllPathsFromEntries(grid, tiles);
+                    const tempReachable = new Set(tempAnalysis.all_paths.flatMap(p => p.path));
+                    
+                    // STAGE 2: If still not connected, try connecting to ANY reachable tile
+                    if (!path.some(pt => tempReachable.has(`${pt.r},${pt.c}`))) {
+                        let closestToReachable = null;
+                        let min_dist_alt = Infinity;
+                        let targetReachableTile = null;
+
+                        path.forEach(pathTile => {
+                            reachableTiles.forEach(reachableCoord => {
+                                const [r,c] = reachableCoord.split(',').map(Number);
+                                const dist = Math.abs(pathTile.r - r) + Math.abs(pathTile.c - c);
+                                if (dist < min_dist_alt) {
+                                    min_dist_alt = dist;
+                                    closestToReachable = pathTile;
+                                    targetReachableTile = {r, c};
+                                }
+                            });
+                        });
+
+                        if (closestToReachable && targetReachableTile) {
+                            layoutManager.drawPath(
+                                {r: closestToReachable.r, c: closestToReachable.c}, 
+                                targetReachableTile, 
+                                'bridge'
+                            );
+                        }
+                    }
+                    
+                    // Final re-run of analysis after potential repairs
+                    analysisResult = findAllPathsFromEntries(grid, tiles);
+                    break; 
+                }
+            }
+        }
+    }
+
+    // Pass the grid explicitly to the pathfinder.
+    const { all_paths } = analysisResult;
+
+    // Last check: if after all repairs, any of the originally defined paths
+    // do not have a single corresponding route to the key, discard the layout.
+    const finalConnectedPathIndices = new Set();
+    all_paths.forEach(p => {
+        const firstTileCoord = p.path[0];
+        for(let i=0; i < nonEmptyPaths.length; i++) {
+            if (nonEmptyPaths[i].some(pt => `${pt.r},${pt.c}` === firstTileCoord)) {
+                finalConnectedPathIndices.add(i);
+                break; // Found the original path for this route
+            }
+        }
+    });
+
+    if (finalConnectedPathIndices.size < nonEmptyPaths.length) {
+        console.warn(`Discarding layout: Path connectivity failure. Expected ${nonEmptyPaths.length} connected paths, found ${finalConnectedPathIndices.size}.`);
+        return { tiles: [], analysis: null }; // Discard layout
+    }
+    
+    // If we have exactly two paths and they share a start tile, it implies a main route
+    // and a single-detour route. We merge these into one "completionist" path representing
+    // the cost of clearing both the main path and the dead-end branch.
+    if (all_paths.length === 2 && all_paths[0].path[0] === all_paths[1].path[0]) {
+        // The path with MORE steps is the one that includes the detour. We keep that one.
+        const supersetPath = all_paths[0].path.length > all_paths[1].path.length
+            ? all_paths[0]
+            : all_paths[1];
+        all_paths = [supersetPath];
+    }
+
     const reachableEntries = new Set(all_paths.map(p => p.path[0]));
     tiles.forEach(t => {
         if (t.isEntryPoint && !reachableEntries.has(`${t.row-1},${t.col-1}`)) {
@@ -373,24 +546,19 @@ export const generateBoardLayout = (config) => {
             }
         }
     }
-    // Costs for every generated strategic path (including dead-ends)
-    const pathCostsAll = all_paths.map(p => Math.ceil(p.cost));
+    const pathCosts = all_paths.map(p => p.cost);
 
-    // Metrics should ignore dead-end paths because they don’t reach the key
-    const successfulPaths = all_paths.filter(p => p.reachedKey !== false);
-    const successfulCosts = successfulPaths.map(p => p.cost);
-
-    const avgCost = successfulCosts.length > 0 ? successfulCosts.reduce((a, b) => a + b, 0) / successfulCosts.length : 0;
-    const maxDiff = successfulCosts.length > 0 ? Math.max(...successfulCosts.map(c => Math.abs(c - avgCost))) : 0;
+    const avgCost = pathCosts.length > 0 ? pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length : 0;
+    const maxDiff = pathCosts.length > 0 ? Math.max(...pathCosts.map(c => Math.abs(c - avgCost))) : 0;
     const costVariancePercent = avgCost > 0 ? (maxDiff / avgCost) * 100 : 0;
 
     const analysis = {
-        path_costs: pathCostsAll,
+        path_costs: pathCosts.map(cost => Math.ceil(cost)),
         cost_variance: costVariancePercent,
         balanced_costs: costVariancePercent <= 15,
-        shortest_path: successfulCosts.length > 0 ? Math.ceil(Math.min(...successfulCosts)) : 0,
-        longest_path: successfulCosts.length > 0 ? Math.ceil(Math.max(...successfulCosts)) : 0,
-        average_path: successfulCosts.length > 0 ? successfulCosts.reduce((a, b) => a + b, 0) / successfulCosts.length : 0,
+        shortest_path: pathCosts.length > 0 ? Math.ceil(Math.min(...pathCosts)) : 0,
+        longest_path: pathCosts.length > 0 ? Math.ceil(Math.max(...pathCosts)) : 0,
+        average_path: pathCosts.length > 0 ? pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length : 0,
         all_paths: all_paths,
         key_cost: 0,
         milestones: milestones,
