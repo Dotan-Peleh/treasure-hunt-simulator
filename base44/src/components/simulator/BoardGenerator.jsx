@@ -49,51 +49,12 @@ export const generateBoardLayout = (config) => {
     // --- BOARD SANITIZATION AND SETUP ---
     // This process now runs for ALL layouts, including custom ones, to ensure consistency.
 
-    // 1. Create a flexible 6-tile start area (always 6 "start" tiles but in varied shapes)
-    const chooseStartAreaCoords = () => {
-        const bottomRow = rows - 1;      // index 8
-        const secondRow = rows - 2;      // index 7
-        const thirdRow = rows - 3;       // index 6
-        const pattern = Math.floor(Math.random() * 3); // 0,1,2
-        const coords = [];
-
-        if (pattern === 0) {
-            // Pattern A: 2×3 rectangle (current classic)
-            const startCol = Math.floor(Math.random() * (cols - 2 - 0)); // ensure room for 3 cols
-            for (const r of [secondRow, bottomRow]) {
-                for (let offset = 0; offset < 3; offset++) {
-                    coords.push({ r, c: startCol + offset });
-                }
-            }
-        } else if (pattern === 1) {
-            // Pattern B: 2 rows, spaced columns "* *  *" shape
-            const possible = [];
-            for (let sc = 0; sc <= cols - 5; sc++) possible.push(sc); // need room for +4
-            const startCol = possible[Math.floor(Math.random() * possible.length)];
-            const colSet = [startCol, startCol + 2, startCol + 4];
-            for (const r of [secondRow, bottomRow]) {
-                colSet.forEach(c => coords.push({ r, c }));
-            }
-        } else {
-            // Pattern C: 3×2 rectangle (vertical "tower")
-            const startCol = Math.floor(Math.random() * (cols - 1 - 0)); // need room for 2 cols
-            const rowsSet = [thirdRow, secondRow, bottomRow];
-            for (const r of rowsSet) {
-                for (let offset = 0; offset < 2; offset++) {
-                    coords.push({ r, c: startCol + offset });
-                }
-            }
+    // 1. Create a standard 6-tile start area
+    for (let r = 7; r < 9; r++) { // Two bottom rows
+        for (let c = 0; c < 3; c++) { // First three columns
+            grid[r][c] = 'start';
         }
-
-        return coords;
-    };
-
-    const startCoords = chooseStartAreaCoords();
-    startCoords.forEach(({ r, c }) => { grid[r][c] = 'start'; });
-
-    // Guarantee generator positions begin as "start" for BFS; they will be replaced later.
-    grid[8][0] = 'start';
-    grid[8][2] = 'start';
+    }
 
     // 2. Nuke all existing keys to ensure only one is placed.
     for (let r = 0; r < rows; r++) {
@@ -269,6 +230,68 @@ export const generateBoardLayout = (config) => {
     nonEmptyPaths.forEach(path => createBalancedProgression(path, tiles));
     createBalancedProgression(bridgeTiles, tiles);
 
+    // ---------------- AUTO BALANCE ACROSS PATHS -----------------
+    const getTileObj = (r,c) => tiles.find(t=>t.row===r+1 && t.col===c+1);
+    const stepCost = lvl => Math.pow(2, lvl-1);
+
+    const computePathCosts = () => {
+        return nonEmptyPaths.map(p => {
+            return p.reduce((sum, tile)=>{
+                const obj=getTileObj(tile.r,tile.c);
+                return sum + (obj?.required_item_level ? stepCost(obj.required_item_level):0);
+            },0);
+        });
+    };
+
+    let pathCostsBal = computePathCosts();
+    let iterationsBal = 0;
+    while (pathCostsBal.length>1) {
+        const avg = pathCostsBal.reduce((a,b)=>a+b,0)/pathCostsBal.length;
+        const maxDiff = Math.max(...pathCostsBal.map(c=>Math.abs(c-avg)));
+        if (avg===0 || (maxDiff/avg)*100 <= 15 || iterationsBal>300) break;
+
+        // Identify highest and lowest cost paths
+        let maxIdx=0,minIdx=0;
+        pathCostsBal.forEach((c,idx)=>{if(c>pathCostsBal[maxIdx])maxIdx=idx;if(c<pathCostsBal[minIdx])minIdx=idx;});
+
+        const adjustPath = (idx, direction) => { // direction: -1 lower, +1 raise
+            const path = nonEmptyPaths[idx];
+            if(!path) return false;
+            // sort tiles by level desc/asc depending direction
+            const tilesSorted = [...path].sort((a,b)=>{
+                const la=getTileObj(a.r,a.c)?.required_item_level||0;
+                const lb=getTileObj(b.r,b.c)?.required_item_level||0;
+                return direction===-1?lb-la:la-lb;
+            });
+            for(const tileRef of tilesSorted){
+                const obj=getTileObj(tileRef.r,tileRef.c);
+                if(!obj||!obj.required_item_level) continue;
+                const newLevel = Math.min(12, Math.max(2, obj.required_item_level + direction));
+                if(newLevel===obj.required_item_level) continue;
+                // apply
+                const prevCost = stepCost(obj.required_item_level);
+                obj.required_item_level=newLevel;
+                if(obj.required_item_name){
+                    const parts=obj.required_item_name.split(' L');
+                    obj.required_item_name=`${parts[0]} L${newLevel}`;
+                }
+                const newCost = stepCost(newLevel);
+                pathCostsBal[idx]+= (newCost-prevCost);
+                return true;
+            }
+            return false;
+        };
+
+        if(pathCostsBal[maxIdx]-avg > avg - pathCostsBal[minIdx]){
+            // Lower highest path one step
+            adjustPath(maxIdx,-1);
+        }else{
+            // Raise lowest path
+            adjustPath(minIdx,+1);
+        }
+        iterationsBal++;
+    }
+
     // Determine and flag the true entry tile for each path: the tile farthest from the key (bottom-/left-/right-most depending on path shape).
     const usedEntryColumns = new Set();
     nonEmptyPaths.forEach(path => {
@@ -297,12 +320,6 @@ export const generateBoardLayout = (config) => {
         if (tileInBoard) {
             tileInBoard.discovered = true;
             tileInBoard.isEntryPoint = true;
-            // NEW RULE: Entry tiles should be immediately accessible (no unlock requirement)
-            tileInBoard.tile_type = 'free';
-            tileInBoard.unlocked = true;
-            delete tileInBoard.required_item_name;
-            delete tileInBoard.required_item_level;
-            delete tileInBoard.required_item_chain_color;
         }
     });
 
@@ -315,24 +332,16 @@ export const generateBoardLayout = (config) => {
             t.isEntryPoint = false; // Change to false instead of deleting
         }
     });
-
-    // NEW RULES BASED ON DESIGNER FEEDBACK
-    // 1) Ensure all entry tiles remain free/unlocked (handled above)
-    // 2) Remove any cost requirement from the bottom two rows (rows 8 & 9)
-    tiles.forEach(t => {
-        if (t.tile_type === 'semi_locked' && t.row >= 8) {
-            t.tile_type = 'free';
-            t.unlocked = true;
-            delete t.required_item_name;
-            delete t.required_item_level;
-            delete t.required_item_chain_color;
-        }
-    });
     const pathCosts = all_paths.map(p => p.cost);
+
+    const avgCost = pathCosts.length > 0 ? pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length : 0;
+    const maxDiff = pathCosts.length > 0 ? Math.max(...pathCosts.map(c => Math.abs(c - avgCost))) : 0;
+    const costVariancePercent = avgCost > 0 ? (maxDiff / avgCost) * 100 : 0;
 
     const analysis = {
         path_costs: pathCosts.map(cost => Math.ceil(cost)),
-        cost_variance: pathCosts.length > 1 ? Math.abs(Math.max(...pathCosts) - Math.min(...pathCosts)) : 0,
+        cost_variance: costVariancePercent,
+        balanced_costs: costVariancePercent <= 15,
         shortest_path: pathCosts.length > 0 ? Math.ceil(Math.min(...pathCosts)) : 0,
         longest_path: pathCosts.length > 0 ? Math.ceil(Math.max(...pathCosts)) : 0,
         average_path: pathCosts.length > 0 ? pathCosts.reduce((a, b) => a + b, 0) / pathCosts.length : 0,

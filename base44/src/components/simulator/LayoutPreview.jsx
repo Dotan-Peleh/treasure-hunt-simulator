@@ -93,6 +93,12 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
       newAnalysis.all_paths[selectedPathIndex] = { ...newAnalysis.all_paths[selectedPathIndex], cost: Math.ceil(newCost) };
     }
 
+    // Recompute cost variance & balance flag
+    const avg = newAnalysis.path_costs.reduce((a,b)=>a+b,0) / newAnalysis.path_costs.length;
+    const maxDiff = Math.max(...newAnalysis.path_costs.map(c=>Math.abs(c-avg)));
+    newAnalysis.cost_variance = avg>0 ? (maxDiff/avg)*100 : 0;
+    newAnalysis.balanced_costs = newAnalysis.cost_variance <= 15;
+
     setLocalLayout({ ...localLayout, tiles: newTiles });
     setLocalAnalysis(newAnalysis);
   };
@@ -154,6 +160,12 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
       newAnalysis.all_paths = [...newAnalysis.all_paths];
       newAnalysis.all_paths[selectedPathIndex] = { ...newAnalysis.all_paths[selectedPathIndex], cost: Math.ceil(currentCost) };
     }
+
+    // Recompute cost variance & balance flag after balancing
+    const avg = newAnalysis.path_costs.reduce((a,b)=>a+b,0) / newAnalysis.path_costs.length;
+    const maxDiff = Math.max(...newAnalysis.path_costs.map(c=>Math.abs(c-avg)));
+    newAnalysis.cost_variance = avg>0 ? (maxDiff/avg)*100 : 0;
+    newAnalysis.balanced_costs = newAnalysis.cost_variance <= 15;
 
     setLocalLayout({ ...localLayout, tiles: newTiles });
     setLocalAnalysis(newAnalysis);
@@ -397,6 +409,13 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
             {localAnalysis?.path_info?.has_connection && (
               <Badge variant="secondary">Connected</Badge>
             )}
+            {typeof localAnalysis?.balanced_costs === 'boolean' && (
+              localAnalysis.balanced_costs ? (
+                <Badge className="bg-green-100 text-green-700 border-green-300" title="Cost variance ≤ 15%">Balanced</Badge>
+              ) : (
+                <Badge className="bg-yellow-100 text-yellow-800 border-yellow-300" title="Cost variance exceeds 15%">Unbalanced</Badge>
+              )
+            )}
           </div>
           <div className="flex gap-1 ml-2">
              <button
@@ -578,9 +597,9 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                     </Button>
                   </div>
                 )}
-                <div className="flex justify-between text-muted-foreground pt-2">
-                  <span>Cost Variance:</span>
-                  <span>{localAnalysis.cost_variance.toFixed(1)}</span>
+                <div className="flex justify-between">
+                  <span>Cost Variance (%)</span>
+                  <span className={`font-semibold ${localAnalysis.balanced_costs ? 'text-green-700' : 'text-yellow-800'}`}>{localAnalysis.cost_variance.toFixed(1)}%</span>
                 </div>
                  <div className="flex justify-between font-semibold">
                     <span>Shortest Path:</span>
