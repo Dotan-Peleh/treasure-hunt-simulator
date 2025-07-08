@@ -124,8 +124,9 @@ LayoutGeneratorSimulator
 | 5 | Progressive costs; each tile’s level range is 2 … (chainMax-1). | `assignProgressionCosts` + Balancers |
 | 6 | Cost variance ≤ 15 % of mean. | Post-gen rule in simulator. |
 | 7 | Two generators fixed in start area. | `placeGeneratorsAndFrees`. |
-| 8 | Extra free tiles (slider 5-15). | Same helper. |
+| 8 | Extra free tiles (slider 5-15). | `placeGeneratorsAndFrees`. |
 | 9 | Milestone rows fixed, rewards random 25-60. | `generateDynamicMilestones`. |
+| 10 | All entry points must start at a similar difficulty. | Post-balance "Entry Point Level Harmonization" step. |
 
 ## 5. Algorithms
 ### 5.1 Path Drawing
@@ -199,16 +200,27 @@ To make layouts more interesting and analysis more intuitive, two final rules ar
 ## 7. UI Modules
 * **LayoutPreview** – Interactive preview cards with a powerful editing toolbar. Allows for adding/removing entry points (red flags), placing feedback flags (blue), and placing rocks to dynamically block paths and re-calculate costs.
 * **InteractiveBoard** – live board with fog-of-war & milestone overlays.
-* **LayoutGeneratorSimulator** – batch generator, filters, JSON export.
+* **LayoutGeneratorSimulator** – batch generator, filters, JSON export, and custom layout management.
+* **EventConfigForm** - A form within the Liveop Simulator to configure event parameters and see a quick analysis of base layouts.
 
-## 8. Persistence & Export
+## 8. Custom Layout Workflow
+The simulator includes a robust workflow for designing, testing, and promoting your own hand-crafted layouts.
+
+1.  **Define a Layout**: Add a new layout object to the `customLayouts` array in `src/components/simulator/custom-layouts.js`. The `grid` uses simple single-character codes (`p` for path, `r` for rock, `k` for key, `s` for start/free).
+2.  **Generate and Test**: In the `LayoutGeneratorSimulator`, check the "Include All Custom Layouts" box. This will generate your custom designs alongside any procedural ones, allowing you to analyze and test them with the same tools.
+3.  **Iterate and Edit**: Use the editing tools in the `LayoutPreview` (red flags, rocks, etc.) to fine-tune your custom design.
+4.  **Promote or Delete**:
+    *   **Promote**: If you are happy with a custom layout, click the "Promote" button. This will log a complete, permanent layout definition to the console. Copy this definition into the `boardLayouts` array in `src/components/simulator/layout-definitions.js` to make it a permanent part of the procedural generation pool. The layout will then be removed from the custom list.
+    *   **Delete**: If a design isn't working, click the "Delete" button. This will log the ID of the layout to be removed and filter it from the view, allowing you to easily manage your custom layout file.
+
+## 9. Persistence & Export
 Local Storage keys: `generatedLayouts`, `layoutFeedback`.
 Exports: human-readable JSON snapshots for batch or per-layout.
 
-## 9. Public Data Contracts
+## 10. Public Data Contracts
 (TypeScript-style interfaces omitted here for brevity; see source.)
 
-## 10. Roadmap
+## 11. Roadmap
 1. Module split (in-progress). 2. AI play-test bots. 3. CMS pipeline. 4. Designer tweak UI. 5. Localization.
 
 *(End of PRD)*

@@ -1,8 +1,7 @@
-
 import { useState, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Settings, Puzzle, RotateCcw, Download, Edit, Eye, DownloadCloud, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Settings, Puzzle, RotateCcw, Download, Edit, Eye, DownloadCloud, ChevronLeft, ChevronRight, Flag } from 'lucide-react';
 import Chest from '../components/simulator/Chest';
 import NotificationPopup from '../components/simulator/NotificationPopup';
 import CelebrationAnimation from '../components/simulator/CelebrationAnimation';
@@ -17,12 +16,23 @@ import TileEditPanel from '../components/simulator/TileEditPanel';
 import { calculateProgress } from '../components/simulator/GameEngine';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { recalculateAnalysis } from '../generation/analysis';
 
 export default function LiveopSimulator() {
-  const [currentConfig, setCurrentConfig] = useState(null);
+  const [currentConfig, setCurrentConfig] = useState({
+    event_name: 'Default Event',
+    item_chains: [
+      { chain_name: 'Energy Cell', levels: 10, color: 'orange' },
+      { chain_name: 'Data Chip', levels: 8, color: 'blue' },
+      { chain_name: 'Bio Fuel', levels: 8, color: 'green' },
+    ],
+    milestones: [],
+  });
   const [initialLayout, setInitialLayout] = useState(null);
   const [boardTiles, setBoardTiles] = useState([]);
-  const [playerState, setPlayerState] = useState({ credits: 100 });
+  const [playerState, setPlayerState] = useState({ credits: 200 });
   const [selectedTileIndex, setSelectedTileIndex] = useState(null);
   const [activeTab, setActiveTab] = useState("config");
   const [isSimulating, setIsSimulating] = useState(false);
@@ -33,7 +43,7 @@ export default function LiveopSimulator() {
   const [chestHintArea, setChestHintArea] = useState([]);
   const [celebration, setCelebration] = useState(null);
   const [isEditingBoard, setIsEditingBoard] = useState(false);
-  const [isLayoutVisible, setIsLayoutVisible] = useState(false);
+  const [isLayoutVisible, setIsLayoutVisible] = useState(true); // Default to true
   
   // State for managing imported layouts
   const [layoutsToImport, setLayoutsToImport] = useState([]);
@@ -52,45 +62,34 @@ export default function LiveopSimulator() {
   };
   
   const checkMilestones = (newBoard) => {
-    if (!currentConfig?.milestones) return;
+    if (!pathAnalysis || !pathAnalysis.milestones) return;
     
-    // Sort milestones to check from bottom-up
-    const milestones = [...currentConfig.milestones].sort((a, b) => b.row - a.row);
-    let totalReward = 0;
-    let celebrationType = null;
-    const newlyAchievedStates = {};
-    
-    // Create a combined state for this check to handle multiple milestones in one action
-    const allClaimedStates = { ...milestoneStates };
+    const newMilestoneStates = { ...milestoneStates };
+    let newCredits = playerState.credits;
+    let milestoneTriggered = false;
 
-    // Find the highest row (lowest number) where player has DISCOVERED a PATH tile.
-    // This triggers the reward when the tile becomes visible, not when it's unlocked.
-    // Exclude the 'key' tile from this calculation to prevent premature triggers.
-    const discoveredPathTiles = newBoard.filter(tile =>
-        (tile.tile_type === 'semi_locked' || tile.tile_type === 'locked') && tile.discovered
-    );
-    const discoveredRows = discoveredPathTiles.map(tile => tile.row);
-    const highestProgressRow = discoveredRows.length > 0 ? Math.min(...discoveredRows) : 10;
-    
-    milestones.forEach((milestone, index) => {
-      const milestoneKey = `row${milestone.row}`;
-      
-      // Trigger if player's progress is at or past the milestone row AND it hasn't been claimed yet in this session
-      if (highestProgressRow <= milestone.row && !allClaimedStates[milestoneKey]) {
-        totalReward += milestone.reward;
-        newlyAchievedStates[milestoneKey] = true;
-        allClaimedStates[milestoneKey] = true; // Mark as claimed for this check
-        
-        // Use the index from the sorted array to determine celebration type
-        celebrationType = `milestone-${index + 1}`;
-      }
+    pathAnalysis.milestones.forEach(milestone => {
+        // Check if this milestone has already been claimed
+        if (newMilestoneStates[milestone.row]) {
+            return;
+        }
+
+        // Check if any tile in this milestone row is now discovered
+        const isRowDiscovered = newBoard.some(tile => 
+            tile.row === milestone.row && tile.discovered
+        );
+
+        if (isRowDiscovered) {
+            newMilestoneStates[milestone.row] = { discovered: true, claimed: true };
+            newCredits += milestone.reward;
+            showNotification(`Milestone Reached! +${milestone.reward} Energy!`, "success");
+            milestoneTriggered = true;
+        }
     });
 
-    if (totalReward > 0) {
-      setPlayerState(prev => ({ ...prev, credits: prev.credits + totalReward }));
-      setMilestoneStates(prev => ({ ...prev, ...newlyAchievedStates }));
-      showCelebration(celebrationType, totalReward);
-      showNotification(`🎉 Milestone reached! +${totalReward} Energy!`, "success");
+    if (milestoneTriggered) {
+        setMilestoneStates(newMilestoneStates);
+        setPlayerState(prev => ({ ...prev, credits: newCredits }));
     }
   };
 
@@ -102,33 +101,47 @@ export default function LiveopSimulator() {
     setIsSimulating(false);
   };
   
-  const loadLayoutData = (data, options = {}) => {
-    const { makeLayoutVisible = false } = options;
-    const { tiles, analysis, config } = data;
-
-    setCurrentConfig(config);
-    setBoardTiles(tiles);
-    // Store a deep copy of the initial layout for reliable resets
-    setInitialLayout(JSON.parse(JSON.stringify(tiles)));
-    setPathAnalysis(analysis);
-    
-    // Reset game state
-    setPlayerState({ credits: 100 });
-    setSelectedTileIndex(null);
-    setMilestoneStates({}); // Reset dynamic milestone states
-    setHintActive(false);
-    setChestHintArea([]);
-    setIsEditingBoard(false);
-    setIsLayoutVisible(makeLayoutVisible); // Always start with layout hidden
-
-    setActiveTab("playground");
+  const loadLayoutData = (data) => {
+    if (data.layouts && Array.isArray(data.layouts)) {
+        // Batch import from LayoutGenerator
+        setImportedLayouts(data.layouts);
+        const sourceConfig = data.base_config || data.config || currentConfig;
+        setImportSourceConfig(sourceConfig);
+        setCurrentLayoutIndex(0);
+        loadSelectedLayout(data.layouts[0], sourceConfig, true);
+        showNotification(`${data.layouts.length} layouts imported successfully!`, "success");
+    } else if (data.tiles && data.config) {
+        // Single layout import
+        setImportedLayouts([data]);
+        const sourceConfig = data.config || currentConfig;
+        setImportSourceConfig(sourceConfig);
+        setCurrentLayoutIndex(0);
+        loadSelectedLayout(data, sourceConfig, true);
+        showNotification(`Layout imported successfully!`, "success");
+    } else {
+        showNotification("Invalid layout file format.", "error");
+    }
   };
-  
-  const resetGame = () => {
-    if (!currentConfig || !initialLayout) return;
 
-    // Restore the board to its initial generated state
-    setBoardTiles(JSON.parse(JSON.stringify(initialLayout)));
+  const loadSelectedLayout = (layout, sourceConfig, isBatchLoad = false) => {
+    const newConfig = { ...(sourceConfig || currentConfig), ...layout.config };
+    setBoardTiles(layout.tiles);
+    setInitialLayout(JSON.parse(JSON.stringify(layout.tiles)));
+    setPathAnalysis(layout.analysis);
+    setCurrentConfig(newConfig);
+    if (!isBatchLoad) {
+        // If loading a single one from an already imported batch, update the index
+        const idx = importedLayouts.findIndex(l => l.id === layout.id);
+        if(idx !== -1) setCurrentLayoutIndex(idx);
+    }
+    resetGame(true); // Soft reset
+  };
+
+  const resetGame = (isChangingLayout = false) => {
+    if (!isChangingLayout && initialLayout) {
+      // Restore the board to its initial generated state
+      setBoardTiles(JSON.parse(JSON.stringify(initialLayout)));
+    }
 
     // Reset player and game specific states
     setPlayerState({ credits: 100 });
@@ -140,36 +153,6 @@ export default function LiveopSimulator() {
     setIsLayoutVisible(false); // Hide full layout on reset
     
     showNotification("Simulation has been reset with current layout.", "info");
-  };
-
-  const loadSelectedLayout = (layout, sourceConfig, isBatchLoad = false) => {
-    if (!layout || !sourceConfig) return;
-
-    // Create a synthetic config for the LiveopSimulator using the correct data
-    const newConfig = {
-        event_name: layout.name || 'Imported Layout',
-        layout_id: layout.id,
-        item_chains: sourceConfig.itemChains || [],
-        milestones: layout.analysis.milestones || [], 
-        duration_hours: sourceConfig.duration_hours || 72,
-        pathCount: layout.analysis.path_info.path_count || 2,
-        freeTileCount: sourceConfig.freeTileCount || 10,
-    };
-    
-    loadLayoutData({
-        tiles: layout.tiles,
-        analysis: layout.analysis,
-        config: newConfig,
-    }, { makeLayoutVisible: true });
-    
-    if (!isBatchLoad) {
-        // If loading a single layout, clear the browsing state.
-        setImportedLayouts([]);
-        setLayoutsToImport([]);
-        setImportSourceConfig(null);
-    }
-
-    showNotification(`Loaded layout: ${layout.name}`, "success");
   };
 
   const handleLoadAll = () => {
@@ -190,33 +173,71 @@ export default function LiveopSimulator() {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const importedData = JSON.parse(e.target.result);
+        const data = JSON.parse(e.target.result);
+        
+        // --- DATA SANITIZATION ---
+        // We will now IGNORE the item_chains from the imported file and ALWAYS use the
+        // simulator's own default configuration as the single source of truth.
+        // This prevents all issues with stale, incomplete, or invalid configs from old files.
+        
+        // 1. Get the application's default chains and the blue chain for conversion.
+        const defaultChains = [
+          { chain_name: 'Energy Cell', levels: 10, color: 'orange' },
+          { chain_name: 'Data Chip', levels: 8, color: 'blue' },
+          { chain_name: 'Bio Fuel', levels: 8, color: 'green' },
+        ];
+        const blueChain = defaultChains.find(c => c.color === 'blue');
+        let unsupportedChainFound = false;
 
-        if (Array.isArray(importedData.layouts) && importedData.layouts.length > 0) {
-          // This is a full export file from the generator.
-          // Let the user pick which layout to load.
-          setImportSourceConfig(importedData.config);
-          setLayoutsToImport(importedData.layouts);
-        } else if (importedData.tiles && importedData.analysis) {
-          // This is a single layout object. Load it directly.
-           const singleLayout = {
-               ...importedData,
-               name: importedData.config?.event_name || 'Imported Single Layout',
-               id: importedData.config?.layout_id || 'single-import'
-           };
-          const sourceConfig = importedData.config || {};
-          loadSelectedLayout(singleLayout, sourceConfig);
+        // 2. Define the sanitization logic for a single layout.
+        const processAndSanitizeLayout = (layout) => {
+            const sanitizedTiles = layout.tiles.map(tile => {
+                if (!tile.item) return tile;
+                let chainColor = tile.item.chain_color || tile.item.chains?.[0]?.color;
+                
+                // If a tile's chain is not in our standard list, convert it to blue.
+                if (chainColor && !['orange', 'blue', 'green'].includes(chainColor)) {
+                    unsupportedChainFound = true;
+                    if (tile.item.type === 'generator') return { ...tile, item: { ...tile.item, chains: [blueChain] } };
+                    
+                    const newLevel = tile.item.level;
+                    return { ...tile, item: { ...tile.item, chain_color: blueChain.color, chain_name: blueChain.chain_name, chain: blueChain, name: `${blueChain.chain_name} L${newLevel}` } };
+                }
+                return tile;
+            });
+            return { ...layout, tiles: sanitizedTiles };
+        };
+
+        // 3. Apply sanitization to the imported data.
+        let sanitizedData;
+        if (data.layouts && Array.isArray(data.layouts)) {
+            const sanitizedLayouts = data.layouts.map(processAndSanitizeLayout);
+            sanitizedData = { ...data, layouts: sanitizedLayouts };
         } else {
-          throw new Error("Invalid or unrecognized layout file format.");
+            sanitizedData = processAndSanitizeLayout(data);
         }
+        
+        // 4. Force the sanitized data to use the application's default config.
+        if (sanitizedData.config) {
+            sanitizedData.config.item_chains = defaultChains;
+        } else if (sanitizedData.base_config) {
+            sanitizedData.base_config.item_chains = defaultChains;
+        }
+
+        if (unsupportedChainFound) {
+            showNotification(`Unsupported items were found and converted to the 'blue' type.`, "warning");
+        }
+        // --- END SANITIZATION ---
+        
+        loadLayoutData(sanitizedData);
+
       } catch (error) {
-        showNotification(`Error importing file: ${error.message}`, "error");
-        console.error("Import error:", error);
+        showNotification("Failed to parse JSON file.", "error");
+        console.error("JSON parsing error:", error);
       }
     };
     reader.readAsText(file);
-    // Reset file input to allow importing the same file again
-    event.target.value = null;
+    event.target.value = null; // Reset file input
   };
 
   const handleTileUpdate = (index, newTileData) => {
@@ -255,7 +276,7 @@ export default function LiveopSimulator() {
 
       const generator = clickedTile.item;
       const selectedChain = generator.chains[Math.floor(Math.random() * generator.chains.length)];
-      const itemLevel = generateItemLevel();
+      const itemLevel = generateItemLevel(selectedChain);
 
       const newItem = {
         id: `item-${Date.now()}`,
@@ -284,6 +305,7 @@ export default function LiveopSimulator() {
         
         // NEW MERGE CHECK: Based on color and level, not name.
         if (
+          selectedTile.item && // <-- FIX: Ensure selected tile has an item
           selectedTile.item.chain_color === clickedTile.item.chain_color &&
           selectedTile.item.level === clickedTile.item.level
         ) {
@@ -330,10 +352,12 @@ export default function LiveopSimulator() {
 
         } else {
           // More informative error messages
-          if (selectedTile.item.level !== clickedTile.item.level) {
-              showNotification(`Cannot merge items of different levels (L${selectedTile.item.level} vs L${clickedTile.item.level}).`, "error");
-          } else if (selectedTile.item.chain_color !== clickedTile.item.chain_color) {
-              showNotification(`Cannot merge items from different chains (visually different colors).`, "error");
+          if (selectedTile.item && clickedTile.item) {
+            if (selectedTile.item.level !== clickedTile.item.level) {
+                showNotification(`Cannot merge items of different levels (L${selectedTile.item.level} vs L${clickedTile.item.level}).`, "error");
+            } else if (selectedTile.item.chain_color !== clickedTile.item.chain_color) {
+                showNotification(`Cannot merge items from different chains (visually different colors).`, "error");
+            }
           }
           setSelectedTileIndex(clickedIndex);
         }
@@ -528,6 +552,55 @@ export default function LiveopSimulator() {
     setIsEditingBoard(p => !p);
   };
 
+  const handleFlagTile = (clickedIndex) => {
+    const newTiles = [...boardTiles];
+    const tile = newTiles[clickedIndex];
+    if (tile.tile_type !== 'semi_locked' && tile.tile_type !== 'bridge') {
+      showNotification("Only path tiles can be flagged as new entry points.", "warning");
+      return;
+    }
+    
+    const isNowEntryPoint = !tile.isEntryPoint;
+    let discovered = tile.discovered;
+
+    if (isNowEntryPoint) {
+      // If flagging as an entry point, it must be discovered.
+      discovered = true;
+    } else {
+      // If un-flagging, it should only remain discovered if it's unlocked itself
+      // or is adjacent to another unlocked tile. Otherwise, it goes back into the fog.
+      let remainsDiscovered = tile.unlocked;
+      if (!remainsDiscovered) {
+        const { row, col } = tile;
+        const adjacentPositions = [
+          { r: row - 1, c: col }, { r: row + 1, c: col },
+          { r: row, c: col - 1 }, { r: row, c: col + 1 }
+        ];
+        const isAdjacentToUnlocked = newTiles.some(t =>
+          t.unlocked && adjacentPositions.some(p => p.r === t.row && p.c === t.col)
+        );
+        remainsDiscovered = isAdjacentToUnlocked;
+      }
+      discovered = remainsDiscovered;
+    }
+
+    newTiles[clickedIndex] = { ...tile, isEntryPoint: isNowEntryPoint, discovered };
+    
+    // Create a new layout object to trigger re-analysis
+    const newLayout = { ...currentConfig, tiles: newTiles, analysis: pathAnalysis };
+    
+    // This assumes a recalculateAnalysis function is available or will be added
+    // For now, we'll just update the tiles and let a future effect handle it.
+    setBoardTiles(newTiles);
+    
+    // A more robust solution would be to call a dedicated analysis function here
+    // similar to the one in LayoutPreview
+    const newAnalysis = recalculateAnalysis(newLayout);
+    setPathAnalysis(newAnalysis);
+
+    showNotification(`Entry point ${isNowEntryPoint ? 'added' : 'removed'}.`, "success");
+  };
+
   const handleDeleteItem = (indexToDelete) => {
       if (indexToDelete === null) return;
       const newBoard = [...boardTiles];
@@ -692,13 +765,12 @@ export default function LiveopSimulator() {
     return emptyTiles[Math.floor(Math.random() * emptyTiles.length)].index;
   };
 
-  const generateItemLevel = () => {
-    if (!currentConfig || !currentConfig.item_chains || currentConfig.item_chains.length === 0) {
-      return 1; // Fallback to level 1 if no config or chains
+  const generateItemLevel = (chain) => {
+    if (!chain) {
+      return 1; // Fallback if no chain is provided
     }
     
-    // Use the first chain's probabilities as default for generators
-    const chain = currentConfig.item_chains[0];
+    // Use the provided chain's probabilities, with a default
     const probabilities = chain.level_probabilities || { 1: 90, 2: 10 };
     
     const random = Math.random() * 100;
@@ -827,6 +899,10 @@ export default function LiveopSimulator() {
                         <Edit className="w-4 h-4" />
                         {isEditingBoard ? "Done Editing" : "Edit Board"}
                       </Button>
+                      <Button onClick={() => handleFlagTile(selectedTileIndex)} variant="outline" className="flex items-center gap-2" disabled={selectedTileIndex === null}>
+                        <Flag className="w-4 h-4" />
+                        Toggle Entry Flag
+                      </Button>
                       <Button onClick={handleLayoutChange} variant="outline" className="flex items-center gap-2 bg-gradient-to-r from-purple-50 to-blue-50 hover:from-purple-100 hover:to-blue-100 border-purple-200" disabled={isEditingBoard}>
                         <Puzzle className="w-4 h-4" />
                         Change Layout
@@ -890,6 +966,31 @@ export default function LiveopSimulator() {
                             />
                         ) : (
                           <>
+                            <Card>
+                                <CardHeader>
+                                    <CardTitle>Cost Analysis</CardTitle>
+                                </CardHeader>
+                                <CardContent>
+                                    {pathAnalysis ? (
+                                        <div className="space-y-2">
+                                            <div className="flex justify-between font-semibold">
+                                                <span>Total Strategic Paths:</span>
+                                                <span>{pathAnalysis.all_paths?.length || 0}</span>
+                                            </div>
+                                            <ScrollArea className="h-48 pr-3 border rounded-md">
+                                                <div className="space-y-1 p-2">
+                                                    {pathAnalysis.path_costs.map((cost, index) => (
+                                                        <div className="flex justify-between text-xs p-1 rounded" key={`path-cost-${index}`}>
+                                                            <span>Path {index + 1} Cost:</span>
+                                                            <span>{cost}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </ScrollArea>
+                                        </div>
+                                    ) : <p>No analysis available.</p>}
+                                </CardContent>
+                            </Card>
                             <Chest 
                               onClick={handleChestClick}
                               selectedItem={selectedItem}

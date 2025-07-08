@@ -83,32 +83,27 @@ export const generateBoardLayout = (config) => {
         const layoutManager = new LayoutManager(grid, keyPos);
         grid = layoutManager.generateLayout(pathCount, config.pathPattern);
     
-        // 6. Place three single-chain generators in fixed positions
-        grid[8][0] = 'generator_orange';
-        grid[8][1] = 'generator_blue';
-    grid[8][2] = 'generator_green';
-
-    // Place extra free tiles by converting some rocks
-    const rockTiles = [];
-    for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-            if (grid[r][c] === 'rock') {
-                rockTiles.push({ r, c });
+        // Place extra free tiles by converting some rocks
+        const rockTiles = [];
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                if (grid[r][c] === 'rock') {
+                    rockTiles.push({ r, c });
+                }
             }
         }
-    }
 
-    // Shuffle the rock tiles and pick the first N to convert
-    rockTiles.sort(() => Math.random() - 0.5);
-    for (let i = 0; i < Math.min(freeTileCount, rockTiles.length); i++) {
-        const tile = rockTiles[i];
-        grid[tile.r][tile.c] = 'free';
-    }
+        // Shuffle the rock tiles and pick the first N to convert
+        rockTiles.sort(() => Math.random() - 0.5);
+        for (let i = 0; i < Math.min(freeTileCount, rockTiles.length); i++) {
+            const tile = rockTiles[i];
+            grid[tile.r][tile.c] = 'free';
+        }
     }
     
     // 5. Run accessibility validation for ALL grids (custom and procedural)
     grid = validateAndRepairLayout(grid);
-
+    
     // --- ENFORCE FREE TILE CLUSTER FOR ALL LAYOUTS ---
     // This ensures a consistent starting area regardless of the layout source.
     
@@ -133,20 +128,21 @@ export const generateBoardLayout = (config) => {
     extraCoords.forEach(({r,c})=>{ grid[r][c]='free'; });
 
     
-    // 6. Place three single-chain generators in fixed positions
+    // 4. Place three single-chain generators in fixed, standard positions
     grid[8][0] = 'generator_orange';
     grid[8][1] = 'generator_blue';
     grid[8][2] = 'generator_green';
+
 
     // The rest of the function (tile creation, cost assignment, analysis) remains the same
     // and will now operate on the correct grid, whether custom or procedural.
 
     const tiles = [];
     
-    // Ensure we have the 3 standard chains with correct levels
-    const orangeChain = item_chains.find(c => c.color === 'orange') || { chain_name: 'Energy Cell', levels: 12, color: 'orange' };
-    const blueChain = item_chains.find(c => c.color === 'blue') || { chain_name: 'Data Chip', levels: 10, color: 'blue' };
-    const greenChain = item_chains.find(c => c.color === 'green') || { chain_name: 'Bio Fuel', levels: 10, color: 'green' };
+    // Ensure we have the 3 standard chains with correct levels for generator instantiation
+    const orangeChain = item_chains.find(c => c.color === 'orange') || { chain_name: 'Energy Cell', levels: 10, color: 'orange' };
+    const blueChain = item_chains.find(c => c.color === 'blue') || { chain_name: 'Data Chip', levels: 8, color: 'blue' };
+    const greenChain = item_chains.find(c => c.color === 'green') || { chain_name: 'Bio Fuel', levels: 8, color: 'green' };
     
     // Collect all path tiles together for processing
     const pathTiles = [];
@@ -266,7 +262,10 @@ export const generateBoardLayout = (config) => {
     // ---------------- AUTO BALANCE ACROSS PATHS -----------------
     const getTileObj = (r,c) => tiles.find(t=>t.row===r+1 && t.col===c+1);
     const stepCost = lvl => Math.pow(2, lvl-1);
-    const chainMaxMap = { orange: 12, blue: 10, green: 10 };
+    const chainMaxMap = item_chains.reduce((acc, chain) => {
+        acc[chain.color] = chain.levels;
+        return acc;
+    }, {});
 
     const computePathCosts = () => {
         return nonEmptyPaths.map(p => {

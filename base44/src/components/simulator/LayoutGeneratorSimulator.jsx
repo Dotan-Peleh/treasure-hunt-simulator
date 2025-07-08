@@ -42,9 +42,8 @@ export default function LayoutGeneratorSimulator() {
     numRandomLayouts: 20,
     includeCustomLayouts: false,
     itemChains: [
-      { chain_name: 'Energy Cell', levels: 12, color: 'orange' },
-      { chain_name: 'Data Chip', levels: 10, color: 'blue' },
-      { chain_name: 'Bio Fuel', levels: 10, color: 'green' }
+      { chain_name: 'Energy Cell', levels: 10, color: 'orange' },
+      { chain_name: 'Data Chip', levels: 8, color: 'blue' },
     ],
     // MILESTONE REWORK: Now controlled by a single 'count' value.
     // The actual rewards and rows will be generated dynamically.
@@ -396,7 +395,7 @@ export default function LayoutGeneratorSimulator() {
     const newLayout = { ...layout, tiles: layout.tiles.map(t => ({ ...t })) };
     const tiles = newLayout.tiles;
     const getTileObj = (r, c) => tiles.find(t => t.row === r + 1 && t.col === c + 1);
-    const chainMaxMap = { orange: 12, blue: 10, green: 10 };
+    const chainMaxMap = { orange: 10, blue: 8 };
 
     const pathTileRefs = newLayout.analysis.all_paths.map(p =>
       p.path.map(coord => {

@@ -63,10 +63,8 @@ export default function InteractiveBoard({
 
   const renderItem = (item) => {
     if (item.type === 'generator') {
-      const hasGreen = item.chains.some(c => c.color === 'green');
-      const generatorClass = hasGreen 
-        ? 'bg-green-500' 
-        : 'bg-gradient-to-br from-blue-400 to-orange-400';
+      const color = item.chains[0]?.color || 'orange'; // Default to orange
+      const generatorClass = itemBgColors[color] || 'bg-gray-500';
 
       return (
         <div className="relative w-10 h-10 md:w-12 md:h-12 cursor-pointer group">
