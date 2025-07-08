@@ -5,6 +5,7 @@ function calculateStepCost(level) {
   return Math.pow(2, level - 1);
 }
 
+// The 'grid' is now passed as an explicit argument to avoid stale closures.
 export function findAllPathsFromEntries(grid, allTiles) {
   // Greedy "up-first" path calculation. For each entry point, march toward the key
   // choosing (1) up if possible, (2) left/right if blocked (preferring the side
@@ -30,6 +31,12 @@ export function findAllPathsFromEntries(grid, allTiles) {
   if (!keyPos) return { all_paths: [] };
 
   const keyStr = `${keyPos.r},${keyPos.c}`;
+
+  // A tile counts as reaching the goal if it is the key itself OR directly adjacent (N,S,E,W) to it.
+  const isGoal = (r, c) => {
+    if (`${r},${c}` === keyStr) return true;
+    return Math.abs(r - keyPos.r) + Math.abs(c - keyPos.c) === 1;
+  };
 
   // Identify entry points flagged on tiles.
   const entries = [...tileMap.entries()]
@@ -58,7 +65,7 @@ export function findAllPathsFromEntries(grid, allTiles) {
     const visited = new Set(path);
     let safety = rows * cols;
 
-    while (`${r},${c}` !== keyStr && safety-- > 0) {
+    while (!isGoal(r, c) && safety-- > 0) {
       const candidates = [];
 
       // Attempt to move up first (row - 1).
@@ -74,15 +81,9 @@ export function findAllPathsFromEntries(grid, allTiles) {
         candidates.push({ r, c: c + 1, priority: 1 });
       }
 
-      // Optional down move (only considered if nothing else works)
-      if (!candidates.length && passable(r + 1, c) && !visited.has(`${r + 1},${c}`)) {
-        candidates.push({ r: r + 1, c, priority: 2 });
-      }
+      // Note: Player never moves DOWN, so we omit downward steps entirely.
 
-      if (!candidates.length) {
-        // We hit a dead-end; return what we have so far.
-        return { path, cost, reachedKey: false };
-      }
+      if (!candidates.length) break; // dead-end
 
       // 10 % random noise override
       if (opts.noise && Math.random() < 0.10) {
@@ -114,8 +115,7 @@ export function findAllPathsFromEntries(grid, allTiles) {
       visited.add(coord);
     }
 
-    // Reached key successfully
-    return { path, cost, reachedKey: true };
+    return isGoal(r, c) ? { path, cost } : null;
   };
 
   const all_paths = [];
@@ -135,8 +135,9 @@ export function findAllPathsFromEntries(grid, allTiles) {
 
     while (queue.length && emitted < MAX_BRANCH_PATHS) {
       const node = queue.shift();
-      if (node.path[node.path.length - 1] === keyStr) {
-        addPath({ path: node.path, cost: node.cost, reachedKey: true });
+      const [tr, tc] = node.path[node.path.length - 1].split(',').map(Number);
+      if (isGoal(tr, tc)) {
+        addPath({ path: node.path, cost: node.cost });
         emitted++;
         continue;
       }
@@ -147,7 +148,74 @@ export function findAllPathsFromEntries(grid, allTiles) {
       if (passable(r - 1, c) && !node.visited.has(`${r - 1},${c}`)) candidates.push({ r: r - 1, c, priority: 0 });
       if (passable(r, c - 1) && !node.visited.has(`${r},${c - 1}`)) candidates.push({ r, c: c - 1, priority: 1 });
       if (passable(r, c + 1) && !node.visited.has(`${r},${c + 1}`)) candidates.push({ r, c: c + 1, priority: 1 });
-      if (!candidates.length && passable(r + 1, c) && !node.visited.has(`${r + 1},${c}`)) candidates.push({ r: r + 1, c, priority: 2 });
+      // (No downward exploration)
+
+      // NEW: Dead-end handling — if no forward moves, treat this as a detour and
+      // then continue toward the key. We build the cheapest path from the dead-end
+      // back to the main goal and merge it with the current trail so the final
+      // result still reaches the key while including the extra cost of the detour.
+      if (!candidates.length) {
+        // BFS from dead-end to key (ignoring visited) to find shortest completion
+        const q = [{ r, c }];
+        const prev = new Map([[`${r},${c}`, null]]);
+        let found = false;
+        while (q.length && !found) {
+          const { r: cr, c: cc } = q.shift();
+          const neigh = [
+            { r: cr - 1, c: cc }, // up
+            { r: cr, c: cc - 1 }, // left
+            { r: cr, c: cc + 1 }  // right
+          ];
+          for (const { r: nr, c: nc } of neigh) {
+            const key = `${nr},${nc}`;
+            if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+            if (!passable(nr, nc)) continue;
+            if (prev.has(key)) continue;
+            prev.set(key, `${cr},${cc}`);
+            if (isGoal(nr, nc)) { found = true; break; }
+            q.push({ r: nr, c: nc });
+          }
+        }
+
+        if (found) {
+          // Reconstruct tail from dead-end to the goal tile we reached.
+          const tail = [];
+          // Find which goal tile ended the BFS (closest to key)
+          let goalCoord = null;
+          for (const [coord, prevCoord] of prev.entries()) {
+            if (coord && isGoal(...coord.split(',').map(Number))) {
+              goalCoord = coord;
+              break;
+            }
+          }
+          if (!goalCoord) goalCoord = keyStr;
+
+          let cur = goalCoord;
+          while (cur) { tail.push(cur); cur = prev.get(cur); }
+          tail.reverse(); // starts with dead-end (already in node.path)
+
+          // Merge paths, avoiding duplicate coordinate at stitch-point.
+          const fullPath = [...node.path, ...tail.slice(1)];
+
+          // Compute cost over UNIQUE tiles (unlock once).
+          const seen = new Set();
+          let totalCost = 0;
+          for (const coord of fullPath) {
+            if (seen.has(coord)) continue;
+            seen.add(coord);
+            const [pr, pc] = coord.split(',').map(Number);
+            totalCost += stepCost(pr, pc);
+          }
+
+          addPath({ path: fullPath, cost: totalCost });
+          emitted++;
+        } else {
+          // No route to key (shouldn’t happen) – fallback to old behaviour.
+          addPath({ path: node.path, cost: node.cost });
+          emitted++;
+        }
+        continue; // proceed with next queued node
+      }
 
       candidates.sort((a, b) => {
         const costDiff = stepCost(a.r, a.c) - stepCost(b.r, b.c);
@@ -169,13 +237,6 @@ export function findAllPathsFromEntries(grid, allTiles) {
           visited: newVisited
         });
       }
-
-      // If there are no further moves and we're stuck, record this dead-end path.
-      if (!candidates.length) {
-        addPath({ path: node.path, cost: node.cost, reachedKey: false });
-        emitted++;
-        continue;
-      }
     }
   };
 
@@ -191,6 +252,27 @@ export function findAllPathsFromEntries(grid, allTiles) {
 
     // 4. Branch exploration at forks
     exploreForks(entry);
+  }
+
+  // ------------------------------------------------------------
+  // FINAL NORMALISATION — ensure every path's cost counts each
+  // semi-locked tile only ONCE, even if the coordinate appears
+  // multiple times in its sequence (e.g. U-turn detours).
+  // ------------------------------------------------------------
+  const recomputeCost = (coords) => {
+    const seen = new Set();
+    let total = 0;
+    for (const coord of coords) {
+      if (seen.has(coord)) continue;
+      seen.add(coord);
+      const [r, c] = coord.split(',').map(Number);
+      total += stepCost(r, c);
+    }
+    return total;
+  };
+
+  for (const p of all_paths) {
+    p.cost = recomputeCost(p.path);
   }
 
   return { all_paths };

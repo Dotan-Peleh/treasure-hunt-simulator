@@ -74,6 +74,15 @@ The application will be available at `http://localhost:5173` (or the next availa
 
 *(The following expands on the quick overview above and documents the entire system end-to-end.)*
 
+## 1. User Roles & Personas
+The simulator is designed to serve three distinct roles in the game development lifecycle:
+
+| Role | Primary Application | Core Task |
+|---|---|---|
+| **Game Designer** | `LayoutGeneratorSimulator` | **Analyze & Select.** Mass-produces and filters hundreds of layouts based on high-level metrics (cost variance, balance, complexity) to find strategically sound candidates for further refinement. |
+| **Level Designer** | `LiveopSimulator` (Edit Mode) | **Refine & Tweak.** Takes a promising layout and uses the interactive editing tools to manually adjust tile placements, item requirements, and entry points to perfect the player experience. |
+| **QA Tester** | `LiveopSimulator` (Play Mode) | **Validate & Report.** Plays through a layout exactly as a player would to identify frustrating bottlenecks, confusing paths, or bugs. Uses the feedback tools (comments, flags) to report issues. |
+
 ## 1. Vision
 Design a deterministic yet highly-configurable engine that:
 1. Procedurally generates board layouts for a merge-puzzle / live-ops event.
@@ -153,6 +162,25 @@ The layout analysis gains:
 "cost_variance": 12.5,          // percentage difference to mean
 "balanced_costs": true          // helper flag for UI badges
 ```
+
+### 5.6 Single-Unlock Cost Accounting
+
+Players only pay the unlock cost for a **semi_locked** tile the *first* time they clear it. If a path loops back over an already-cleared coordinate the player walks through for free.  
+
+`findAllPathsFromEntries` therefore recomputes each path’s cost after construction by summing **unique** coordinates only. This guarantees the analysis (and UI badges) match real gameplay even when a route contains U-turn detours.
+
+```js
+// pseudo
+const seen = new Set();
+let total = 0;
+for (tile of path) {
+  if (seen.has(tile.coord)) continue;   // visited before – free
+  seen.add(tile.coord);
+  total += stepCost(tile.required_item_level);
+}
+```
+
+This logic is mirrored in the LiveOps Simulator during actual play – a semi-locked tile flips to `unlocked` after a successful merge and never requires a second item.
 
 ## 6. Scoring Metrics
 | Metric | Formula |

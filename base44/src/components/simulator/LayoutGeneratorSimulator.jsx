@@ -117,7 +117,7 @@ export default function LayoutGeneratorSimulator() {
       // The 15% cost deviation rule has been removed. All layouts will be kept.
 
       return {
-        id: layoutId,
+        id: String(layoutId), // Ensure ID is always a string
         name: name,
         tiles: result.tiles,
         analysis: {

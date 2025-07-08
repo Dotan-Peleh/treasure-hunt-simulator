@@ -87,6 +87,29 @@ export class LayoutManager {
         return cols;
     }
 
+    drawDeadEndBranch(startPos, pathType) {
+        const length = Math.floor(Math.random() * 3) + 2; // 2, 3, or 4 tiles
+        let current = { ...startPos };
+        
+        const validDirs = [
+            { r: 0, c: 1 }, { r: 0, c: -1 }, { r: -1, c: 0 } // Right, Left, Up
+        ];
+        const dir = validDirs[Math.floor(Math.random() * validDirs.length)];
+
+        for (let i = 0; i < length; i++) {
+            const nextR = current.r + dir.r;
+            const nextC = current.c + dir.c;
+
+            if (nextR < 0 || nextR >= this.rows || nextC < 0 || nextC >= this.cols || this.grid[nextR][nextC] !== 'rock') {
+                break; // Stop if out of bounds or not a rock
+            }
+            
+            current.r = nextR;
+            current.c = nextC;
+            this.grid[current.r][current.c] = pathType;
+        }
+    }
+
     drawPath(start, end, type) {
         // Simple Manhattan-ish walk with slight randomness.
         let current = { ...start };
@@ -95,6 +118,11 @@ export class LayoutManager {
             // Mark current cell (skip if start or key)
             if (this.grid[current.r][current.c] !== 'start' && this.grid[current.r][current.c] !== 'key') {
                 this.grid[current.r][current.c] = type;
+
+                // NEW: 15% chance to spawn a dead-end branch from the main path
+                if (type.startsWith('path') && Math.random() < 0.15) {
+                    this.drawDeadEndBranch(current, type);
+                }
             }
 
             const moveR = Math.sign(end.r - current.r);
