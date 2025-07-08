@@ -49,12 +49,51 @@ export const generateBoardLayout = (config) => {
     // --- BOARD SANITIZATION AND SETUP ---
     // This process now runs for ALL layouts, including custom ones, to ensure consistency.
 
-    // 1. Create a standard 6-tile start area
-    for (let r = 7; r < 9; r++) { // Two bottom rows
-        for (let c = 0; c < 3; c++) { // First three columns
-            grid[r][c] = 'start';
+    // 1. Create a flexible 6-tile start area (always 6 "start" tiles but in varied shapes)
+    const chooseStartAreaCoords = () => {
+        const bottomRow = rows - 1;      // index 8
+        const secondRow = rows - 2;      // index 7
+        const thirdRow = rows - 3;       // index 6
+        const pattern = Math.floor(Math.random() * 3); // 0,1,2
+        const coords = [];
+
+        if (pattern === 0) {
+            // Pattern A: 2×3 rectangle (current classic)
+            const startCol = Math.floor(Math.random() * (cols - 2 - 0)); // ensure room for 3 cols
+            for (const r of [secondRow, bottomRow]) {
+                for (let offset = 0; offset < 3; offset++) {
+                    coords.push({ r, c: startCol + offset });
+                }
+            }
+        } else if (pattern === 1) {
+            // Pattern B: 2 rows, spaced columns "* *  *" shape
+            const possible = [];
+            for (let sc = 0; sc <= cols - 5; sc++) possible.push(sc); // need room for +4
+            const startCol = possible[Math.floor(Math.random() * possible.length)];
+            const colSet = [startCol, startCol + 2, startCol + 4];
+            for (const r of [secondRow, bottomRow]) {
+                colSet.forEach(c => coords.push({ r, c }));
+            }
+        } else {
+            // Pattern C: 3×2 rectangle (vertical "tower")
+            const startCol = Math.floor(Math.random() * (cols - 1 - 0)); // need room for 2 cols
+            const rowsSet = [thirdRow, secondRow, bottomRow];
+            for (const r of rowsSet) {
+                for (let offset = 0; offset < 2; offset++) {
+                    coords.push({ r, c: startCol + offset });
+                }
+            }
         }
-    }
+
+        return coords;
+    };
+
+    const startCoords = chooseStartAreaCoords();
+    startCoords.forEach(({ r, c }) => { grid[r][c] = 'start'; });
+
+    // Guarantee generator positions begin as "start" for BFS; they will be replaced later.
+    grid[8][0] = 'start';
+    grid[8][2] = 'start';
 
     // 2. Nuke all existing keys to ensure only one is placed.
     for (let r = 0; r < rows; r++) {
