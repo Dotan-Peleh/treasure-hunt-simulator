@@ -1,13 +1,13 @@
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Key, Zap, Lock, Mountain, Circle, Flag, CheckCircle } from 'lucide-react';
+import { Key, Zap, Lock, Mountain, Circle, Flag, CheckCircle, Trash2, Upload } from 'lucide-react';
 import PropTypes from 'prop-types';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useState, useMemo, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { findAllPathsFromEntries } from '@/generation/pathAnalysis';
 
-export default function LayoutPreview({ layout, analysis, showDetails = true, compact = false }) {
+export default function LayoutPreview({ layout, analysis, showDetails = true, compact = false, onPromote, onDelete }) {
   // Master state for the component's view of the layout and analysis
   const [localLayout, setLocalLayout] = useState(layout);
   const [localAnalysis, setLocalAnalysis] = useState(analysis);
@@ -167,7 +167,9 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
       const stored = JSON.parse(localStorage.getItem('layoutFeedback') || '{}');
       stored[layout.id] = next;
       localStorage.setItem('layoutFeedback', JSON.stringify(stored));
-    } catch {}
+    } catch (e) {
+      console.error("Failed to persist feedback:", e);
+    }
   };
 
   const updateFeedback = (patch) => {
@@ -413,8 +415,12 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-    } catch {}
+    } catch (e) {
+      console.error("Failed to export feedback:", e);
+    }
   };
+
+  const isCustom = String(layout.id).startsWith('custom-');
 
   // ========== JSX Rendering ==========
 
@@ -593,7 +599,7 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
       <CardHeader>
         <CardTitle className="text-lg flex items-center justify-between gap-2">
           <span>{localLayout.name || `Layout ${localLayout.id}`}</span>
-          <div className="flex gap-1">
+          <div className="flex-1 flex justify-center gap-1">
             <Badge variant="outline">#{localLayout.id}</Badge>
             {localAnalysis?.path_info?.has_connection && (
               <Badge variant="secondary">Connected</Badge>
@@ -630,6 +636,18 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                title="Export feedback JSON"
                onClick={exportFeedback}
                className="px-2 py-0.5 text-xs rounded border border-gray-300">📤</button>
+            {isCustom && (
+              <div className="flex gap-2 ml-4">
+                <Button size="xs" variant="outline" onClick={() => onPromote(localLayout)}>
+                  <Upload className="w-4 h-4 mr-1" />
+                  Promote
+                </Button>
+                <Button size="xs" variant="destructive" onClick={() => onDelete(localLayout.id)}>
+                  <Trash2 className="w-4 h-4 mr-1" />
+                  Delete
+                </Button>
+              </div>
+            )}
           </div>
         </CardTitle>
       </CardHeader>
@@ -848,4 +866,6 @@ LayoutPreview.propTypes = {
     analysis: PropTypes.object,
     showDetails: PropTypes.bool,
     compact: PropTypes.bool,
+    onPromote: PropTypes.func,
+    onDelete: PropTypes.func,
 }; 

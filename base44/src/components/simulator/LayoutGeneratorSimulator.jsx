@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { generateBoardLayout } from './BoardGenerator';
 import { boardLayouts } from './layout-definitions';
+import { customLayouts } from './custom-layouts';
 import LayoutPreview from './LayoutPreview';
 import { recalculateAnalysis } from '@/generation/analysis';
 
@@ -39,6 +40,7 @@ export default function LayoutGeneratorSimulator() {
     baseLayoutIterations: 2,
     variationsPerLayout: 5,
     numRandomLayouts: 20,
+    includeCustomLayouts: false,
     itemChains: [
       { chain_name: 'Energy Cell', levels: 12, color: 'orange' },
       { chain_name: 'Data Chip', levels: 10, color: 'blue' },
@@ -158,11 +160,21 @@ export default function LayoutGeneratorSimulator() {
     setCurrentAnalysis(null);
     setLastBalanceCount(null);
 
-    const baseLayouts = (generationConfig.generationType === 'all' || generationConfig.generationType === 'base' || generationConfig.generationType === 'variations')
+    const baseLayouts = (generationConfig.generationType === 'all' || generationConfig.generationType === 'base')
       ? boardLayouts.map(l => ({ id: l.id, name: l.name, grid: null }))
       : [];
 
     const finalGenerationQueue = [];
+
+    // Add custom layouts if the checkbox is ticked
+    if (generationConfig.includeCustomLayouts) {
+        finalGenerationQueue.push(...customLayouts.map(c => ({
+            id: c.id,
+            name: c.name,
+            grid: c.grid,
+            pathCount: 0 // Not used for custom grids
+        })));
+    }
 
     // --- Determine Path Counts for the Batch ---
     const pathCounts = [];
@@ -181,14 +193,7 @@ export default function LayoutGeneratorSimulator() {
             pathCount: pathCounts.pop() || generationConfig.pathCount 
         }));
       }
-    }
-
-    if (generationConfig.generationType === 'all' || generationConfig.generationType === 'variations') {
-      // NOTE: Advanced generator was removed as part of simplification.
-      // This block can be extended in the future if new variation logic is needed.
-    }
-
-    if (generationConfig.generationType === 'all' || generationConfig.generationType === 'random') {
+    } else if (generationConfig.generationType === 'random') {
       // Generate random layouts using the procedural generator
       for (let i = 0; i < generationConfig.numRandomLayouts; i++) {
         finalGenerationQueue.push({ id: `random-${Math.floor(Math.random() * 10000)}`, name: `Random Layout #${i + 1}`, grid: null });
@@ -517,6 +522,64 @@ export default function LayoutGeneratorSimulator() {
     (previewPage + 1) * PREVIEWS_PER_PAGE
   );
 
+  const handlePromoteLayout = (layoutToPromote) => {
+    const nextId = Math.max(...boardLayouts.map(l => l.id), 0) + 1;
+    
+    // Convert the grid of tile objects back to a simple string grid
+    const gridForDef = Array(9).fill(null).map(() => Array(7).fill('r'));
+    layoutToPromote.tiles.forEach(tile => {
+        const r = tile.row - 1;
+        const c = tile.col - 1;
+        if (r >= 0 && r < 9 && c >= 0 && c < 7) {
+            let type;
+            switch (tile.tile_type) {
+                case 'start':
+                case 'free':
+                    type = 's'; break;
+                case 'semi_locked':
+                case 'bridge':
+                    type = 'p'; break;
+                case 'key':
+                    type = 'k'; break;
+                case 'rock':
+                default:
+                    type = 'r'; break;
+            }
+            gridForDef[r][c] = type;
+        }
+    });
+
+    const newLayoutDef = {
+      id: nextId,
+      name: `Promoted: ${layoutToPromote.name}`,
+      grid: gridForDef
+    };
+    
+    console.log("--- PROMOTED LAYOUT DEFINITION ---");
+    console.log("Copy the following object into the 'boardLayouts' array in 'src/components/simulator/layout-definitions.js':");
+    console.log(JSON.stringify(newLayoutDef, null, 2));
+    alert(`Layout "${layoutToPromote.name}" has been promoted with new ID ${nextId}. See console for the definition to copy.`);
+    
+    // Also trigger deletion from custom layouts
+    handleDeleteCustomLayout(layoutToPromote.id);
+  };
+
+  const handleDeleteCustomLayout = (layoutId) => {
+    const newCustomLayouts = customLayouts.filter(l => l.id !== layoutId);
+    
+    // This is a placeholder for the file-writing logic.
+    // In a real application, this would make a request to a backend service
+    // or use a more sophisticated local file access method.
+    console.log("--- UPDATED custom-layouts.js ---");
+    const newFileContent = `export const customLayouts = ${JSON.stringify(newCustomLayouts, null, 4)};`;
+    console.log(newFileContent);
+    alert(`Layout ID ${layoutId} has been removed from the custom layouts. See console for the new file content to save.`);
+    
+    // To make the UI update immediately, we can filter the generated layouts
+    // This assumes that custom layouts are what's currently being shown
+    setGeneratedLayouts(prev => prev.filter(l => l.id !== layoutId));
+  };
+
   return (
     <div className="container mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -615,6 +678,18 @@ export default function LayoutGeneratorSimulator() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
+                <div className="flex items-center space-x-2">
+                    <input
+                        type="checkbox"
+                        id="include-custom"
+                        checked={generationConfig.includeCustomLayouts}
+                        onChange={(e) => setGenerationConfig(prev => ({ ...prev, includeCustomLayouts: e.target.checked }))}
+                        className="h-4 w-4"
+                    />
+                    <label htmlFor="include-custom" className="text-sm font-medium">
+                        Include All Custom Layouts
+                    </label>
+                </div>
                 <div>
                   <label className="text-sm font-medium">Generation Type</label>
                   <select
@@ -622,9 +697,8 @@ export default function LayoutGeneratorSimulator() {
                     onChange={(e) => setGenerationConfig(prev => ({ ...prev, generationType: e.target.value }))}
                     className="w-full mt-1 px-3 py-2 border rounded-md"
                   >
-                    <option value="all">All Types (Base + Variations + Random)</option>
+                    <option value="all">All Procedural Types (Base + Random)</option>
                     <option value="base">Base Layouts Only</option>
-                    <option value="variations">Variations (Not Implemented)</option>
                     <option value="random">Random Only</option>
                   </select>
                   <p className="text-xs text-muted-foreground mt-1">
@@ -1008,6 +1082,8 @@ export default function LayoutGeneratorSimulator() {
                             layout={layout}
                             analysis={layout.analysis}
                             showDetails={true}
+                            onPromote={handlePromoteLayout}
+                            onDelete={handleDeleteCustomLayout}
                         />
                     ))}
                 </CardContent>
@@ -1050,6 +1126,8 @@ export default function LayoutGeneratorSimulator() {
                     layout={layout}
                     analysis={layout.analysis}
                     showDetails={true}
+                    onPromote={handlePromoteLayout}
+                    onDelete={handleDeleteCustomLayout}
                   />
                   ) : (
                     <div key={`${layout.id}-${index}`} className="text-red-500 p-4 border rounded-md">
