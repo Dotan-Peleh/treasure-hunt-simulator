@@ -258,6 +258,12 @@ export const generateBoardLayout = (config) => {
         if (tileInBoard) {
             tileInBoard.discovered = true;
             tileInBoard.isEntryPoint = true;
+            // NEW RULE: Entry tiles should be immediately accessible (no unlock requirement)
+            tileInBoard.tile_type = 'free';
+            tileInBoard.unlocked = true;
+            delete tileInBoard.required_item_name;
+            delete tileInBoard.required_item_level;
+            delete tileInBoard.required_item_chain_color;
         }
     });
 
@@ -268,6 +274,19 @@ export const generateBoardLayout = (config) => {
     tiles.forEach(t => {
         if (t.isEntryPoint && !reachableEntries.has(`${t.row-1},${t.col-1}`)) {
             t.isEntryPoint = false; // Change to false instead of deleting
+        }
+    });
+
+    // NEW RULES BASED ON DESIGNER FEEDBACK
+    // 1) Ensure all entry tiles remain free/unlocked (handled above)
+    // 2) Remove any cost requirement from the bottom two rows (rows 8 & 9)
+    tiles.forEach(t => {
+        if (t.tile_type === 'semi_locked' && t.row >= 8) {
+            t.tile_type = 'free';
+            t.unlocked = true;
+            delete t.required_item_name;
+            delete t.required_item_level;
+            delete t.required_item_chain_color;
         }
     });
     const pathCosts = all_paths.map(p => p.cost);
