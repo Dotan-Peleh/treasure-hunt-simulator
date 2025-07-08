@@ -9,6 +9,7 @@ The primary goal is to create interesting, balanced, and strategically varied bo
 - **Playability is Paramount:** Every generated board is guaranteed to be fully solvable. A validation and repair system runs on every layout to ensure all paths are connected and the key is always reachable from the start area. [[memory:2400481]]
 - **Balance Through Variance:** The key to a good layout is low variance in the cost-to-complete between its paths. The system is designed to create layouts where the strategic choices are not obvious. [[memory:2384090]]
 - **Strategic Funneling:** Paths are generated to guide the player towards the top of the board in a non-obvious way, creating a natural "funnel" that leads to more interesting end-game scenarios.
+- **Robust Imports:** The simulator is built to be resilient. When importing layouts from older versions or external sources, it automatically sanitizes the data. It enforces the current game rules, ensuring that all imported layouts are valid and playable, preventing crashes or unexpected behavior from outdated configurations.
 
 ## Applications
 
@@ -28,7 +29,7 @@ This is an interactive test environment for playing a single, chosen board layou
 
 **Key Features:**
 - **Interactive Gameplay:** Click to unlock tiles, merge items, and progress through the board.
-- **Layout Importing:** Import a single layout or a whole batch from a JSON file. When importing a batch, you can browse through all the layouts.
+- **Layout Importing:** Import a single layout or a whole batch from a JSON file. The system automatically sanitizes imported files to ensure compatibility with the latest rules.
 - **Board Editing:** A powerful feature that allows you to modify a layout on the fly. When you're done editing, your changes are saved as the new "baseline" for the session and can be exported.
 - **Visual Fog of War:** The board is revealed progressively as you unlock tiles, simulating the player experience.
 
@@ -93,7 +94,7 @@ Design a deterministic yet highly-configurable engine that:
 | Term | Meaning |
 |------|---------|
 | **Tile** | Cell on a 9 × 7 grid (`row` 1-9 bottom→top, `col` 1-7 left→right). |
-| **Tile Types** | `start`, `free`, `semi_locked`, `locked`, `rock`, `bridge`, `key`, `generator_mixed`, `generator_green`. |
+| **Tile Types** | `start`, `free`, `semi_locked`, `locked`, `rock`, `bridge`, `key`, `generator_orange`, `generator_blue`, `generator_green`. |
 | **Entry Point** | First discoverable tile of a path (must live in rows 7-9). |
 | **Path** | Contiguous chain of `semi_locked` tiles leading from an entry point to the key. |
 | **Bridge** | Neutral connector auto-inserted by the BFS repair pass. |
@@ -123,7 +124,7 @@ LayoutGeneratorSimulator
 | 4 | All key & path tiles must be reachable. | `validateAndRepairLayout` BFS + bridge repair. |
 | 5 | Progressive costs; each tile’s level range is 2 … (chainMax-1). | `assignProgressionCosts` + Balancers |
 | 6 | Cost variance ≤ 15 % of mean. | Post-gen rule in simulator. |
-| 7 | Two generators fixed in start area. | `placeGeneratorsAndFrees`. |
+| 7 | Three generators (Orange, Blue, Green) fixed in the start area. | `placeGeneratorsAndFrees`. |
 | 8 | Extra free tiles (slider 5-15). | `placeGeneratorsAndFrees`. |
 | 9 | Milestone rows fixed, rewards random 25-60. | `generateDynamicMilestones`. |
 | 10 | All entry points must start at a similar difficulty. | Post-balance "Entry Point Level Harmonization" step. |
@@ -164,7 +165,16 @@ The layout analysis gains:
 "balanced_costs": true          // helper flag for UI badges
 ```
 
-### 5.6 Single-Unlock Cost Accounting
+### 5.6 Import Sanitization
+To ensure stability and prevent crashes from outdated or invalid data, the simulator enforces a strict sanitization process on all imported layout files.
+
+1.  **Ignore Imported Configuration**: The application **completely ignores** the `item_chains` configuration within an imported JSON file.
+2.  **Enforce Internal Configuration**: It **always** uses its own internal, default configuration as the single source of truth for item chain rules (max levels, colors, etc.).
+3.  **Sanitize Tiles**: It then scans all tiles in the imported layout. Any items or generators belonging to unsupported or legacy chains (e.g., a "purple" chain) are automatically converted to a valid, supported type (e.g., "blue").
+
+This guarantees that all loaded layouts are fully compatible with the current game rules, providing a stable and reliable testing environment.
+
+### 5.7 Single-Unlock Cost Accounting
 
 Players only pay the unlock cost for a **semi_locked** tile the *first* time they clear it. If a path loops back over an already-cleared coordinate the player walks through for free.  
 
@@ -183,7 +193,7 @@ for (tile of path) {
 
 This logic is mirrored in the LiveOps Simulator during actual play – a semi-locked tile flips to `unlocked` after a successful merge and never requires a second item.
 
-### 5.7 Path Consolidation & Dead-Ends
+### 5.8 Path Consolidation & Dead-Ends
 To make layouts more interesting and analysis more intuitive, two final rules are applied:
 *   **Faulty Starts & More Dead Ends:** The generator intentionally adds complexity by creating 1-2 short, dead-end paths sprouting from the player's start area. It also has a 15% chance to add a 2-4 tile dead-end branch off of any step in a main path.
 *   **Completionist Path Consolidation:** If the analysis for a board with a single entry point results in exactly two paths (a direct route and a detour), the system consolidates them. It keeps only the longer, more expensive path, representing the total cost for a player who explores the dead-end on their way to the key.
