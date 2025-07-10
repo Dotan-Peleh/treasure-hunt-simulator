@@ -234,3 +234,15 @@ Exports: human-readable JSON snapshots for batch or per-layout.
 1. Module split (in-progress). 2. AI play-test bots. 3. CMS pipeline. 4. Designer tweak UI. 5. Localization.
 
 *(End of PRD)*
+
+## Recent Feature Updates
+
+### Gameplay Mechanics
+*   **Bomb Item:** A new "bomb" item can be placed on the board. When clicked, it detonates, revealing all 8 adjacent tiles and turning its own tile into a `free` space. The bomb's blast radius is previewed on hover.
+*   **Crystal Generators:** Merging two items of the same configured level but from different primary chains now creates a limited-use Crystal Generator. This special purple generator produces Level 1 items from its own unique "Crystal" chain.
+*   **Path-Placed Generators:** Generators can now be placed directly onto `semi_locked` tiles during board editing. When a player unlocks a tile containing a generator, the generator is preserved, and the area around it is revealed, opening up new strategic paths.
+
+### Quality of Life & Editor Improvements
+*   **Live Exporting:** Exporting a layout while in "Edit Board" mode now automatically includes all unsaved changes, ensuring the exported file is always up-to-date.
+*   **Persistent Edits:** Clicking "Done Editing" now properly saves the current board state as the new baseline for the session. The "Reset" button will restore your edited layout, not the original.
+*   **Hidden Items:** Special items like generators and bombs placed on path tiles are now correctly hidden when "Hide Full Layout" is active, preserving the fog-of-war for players.

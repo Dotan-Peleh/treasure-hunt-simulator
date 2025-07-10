@@ -19,7 +19,7 @@ const initialChain = {
   levels: 5,
 };
 
-const EventConfigForm = ({ onConfigCreate, isSimulating }) => {
+const EventConfigForm = ({ onConfigCreate, isSimulating, showFullAnalysis = false }) => {
   const [config, setConfig] = useState({
     event_name: 'Default Event',
     duration_hours: 72,
@@ -28,8 +28,18 @@ const EventConfigForm = ({ onConfigCreate, isSimulating }) => {
       { chain_name: 'Energy Cell', color: 'orange', levels: 12 },
       { chain_name: 'Data Chip', color: 'blue', levels: 8 },
       { chain_name: 'Bio Fuel', color: 'green', levels: 10 },
+      { 
+        chain_name: 'Crystal', 
+        color: 'purple', 
+        levels: 8, 
+        isCrystal: true, 
+        crossChainMergeLevel: 4, 
+        crystalGeneratorUses: 5 
+      },
     ],
     milestoneCount: 3,
+    crossChainMergeLevel: 4,
+    crystalGeneratorUses: 5,
   });
   const [filteredLayouts, setFilteredLayouts] = useState(boardLayouts);
   const [currentLayout, setCurrentLayout] = useState(boardLayouts[0]);
@@ -168,31 +178,47 @@ const EventConfigForm = ({ onConfigCreate, isSimulating }) => {
                     <div className="space-y-4 mt-2">
                   {config.item_chains.map((chain, index) => (
                             <div key={index} className="p-4 border rounded-lg space-y-2">
-                                <Input value={chain.chain_name} onChange={(e) => handleItemChainChange(index, 'chain_name', e.target.value)} placeholder="Chain Name" />
+                                <div className="flex items-center justify-between">
+                                    <Input value={chain.chain_name} onChange={(e) => handleItemChainChange(index, 'chain_name', e.target.value)} placeholder="Chain Name" disabled={chain.isCrystal} />
+                                    <Button onClick={() => removeItemChain(index)} variant="ghost" size="icon" disabled={chain.isCrystal || config.item_chains.length <= 1}>
+                                        <Trash2 className="w-4 h-4" />
+                                    </Button>
+                                </div>
                                 <div className="flex items-center gap-2">
                                     <Input type="number" value={chain.levels} onChange={(e) => handleItemChainChange(index, 'levels', parseInt(e.target.value, 10))} placeholder="Levels" />
-                                    <Select onValueChange={(v) => handleItemChainChange(index, 'color', v)} value={chain.color}>
+                                    <Select onValueChange={(v) => handleItemChainChange(index, 'color', v)} value={chain.color} disabled={chain.isCrystal}>
                                         <SelectTrigger><SelectValue/></SelectTrigger>
                                         <SelectContent>
                                             <SelectItem value="orange">Orange</SelectItem>
                                             <SelectItem value="blue">Blue</SelectItem>
                                             <SelectItem value="green">Green</SelectItem>
-                                            <SelectItem value="purple">Purple</SelectItem>
                                         </SelectContent>
                                     </Select>
-                                    <Button onClick={() => removeItemChain(index)} variant="ghost" size="icon"><Trash2 className="w-4 h-4" /></Button>
-                              </div>
+                                </div>
+                                {chain.isCrystal && (
+                                    <div className="pt-4 mt-4 border-t space-y-4">
+                                        <div>
+                                            <Label>Required Merge Level: {chain.crossChainMergeLevel}</Label>
+                                            <Slider value={[chain.crossChainMergeLevel]} onValueChange={(val) => handleItemChainChange(index, 'crossChainMergeLevel', val[0])} min={1} max={8} step={1} />
+                                        </div>
+                                        <div>
+                                            <Label>Generator Charges: {chain.crystalGeneratorUses}</Label>
+                                            <Slider value={[chain.crystalGeneratorUses]} onValueChange={(val) => handleItemChainChange(index, 'crystalGeneratorUses', val[0])} min={1} max={10} step={1} />
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                   ))}
               </div>
                 </AccordionContent>
             </AccordionItem>
+            {showFullAnalysis && (
             <AccordionItem value="item-4">
                 <AccordionTrigger>Full Analysis</AccordionTrigger>
                 <AccordionContent>
                     <LayoutAnalysis config={config} onLayoutSelect={(id) => handleSelectChange(id.toString())} />
                 </AccordionContent>
-            </AccordionItem>
+            </AccordionItem>) }
           </Accordion>
           <Button onClick={generateAndSetConfig} disabled={isSimulating} className="w-full">
             {isSimulating ? "Creating..." : "Create Simulation"}
@@ -206,6 +232,7 @@ const EventConfigForm = ({ onConfigCreate, isSimulating }) => {
 EventConfigForm.propTypes = {
     onConfigCreate: PropTypes.func.isRequired,
     isSimulating: PropTypes.bool.isRequired,
+    showFullAnalysis: PropTypes.bool,
 };
 
 export default EventConfigForm;

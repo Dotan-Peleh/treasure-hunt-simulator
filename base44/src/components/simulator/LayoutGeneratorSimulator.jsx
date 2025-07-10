@@ -716,6 +716,7 @@ export default function LayoutGeneratorSimulator() {
                     <option value="vertical_lanes">Vertical Lanes</option>
                     <option value="s_curves">Mirrored S-Curves</option>
                     <option value="y_junction">Y-Junction</option>
+                    <option value="horizontal_stripes">Horizontal Stripes</option>
                   </select>
                   <p className="text-xs text-muted-foreground mt-1">
                     Choose a specific path shape or randomize.

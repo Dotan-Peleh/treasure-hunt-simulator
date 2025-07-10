@@ -163,5 +163,29 @@ export const customLayouts = [
             ['s', 's', 's', 'p', 's', 's', 's'],
             ['s', 's', 's', 'p', 's', 's', 's'],
         ]
+    },
+    {
+        id: 'custom-12',
+        name: 'Horizontal Stripes Key Right',
+        grid: [
+            // Row 1 (top): path row with key at last column
+            ['p', 'p', 'p', 'p', 'p', 'p', 'k'],
+            // Row 2: alternating path/rock pattern
+            ['p', 'r', 'p', 'r', 'p', 'r', 'p'],
+            // Row 3: same alternating pattern
+            ['p', 'r', 'p', 'r', 'p', 'r', 'p'],
+            // Row 4: full path corridor
+            ['p', 'p', 'p', 'p', 'p', 'p', 'p'],
+            // Row 5: narrow central corridor flanked by rocks
+            ['r', 'r', 'r', 'p', 'r', 'r', 'r'],
+            // Row 6: full path corridor again
+            ['p', 'p', 'p', 'p', 'p', 'p', 'p'],
+            // Row 7: mirrored narrow corridor with rocks
+            ['r', 'r', 'r', 'p', 'r', 'r', 'r'],
+            // Row 8: full path row just above start
+            ['p', 'p', 'p', 'p', 'p', 'p', 'p'],
+            // Row 9 (bottom): green start row
+            ['s', 's', 's', 's', 's', 's', 's'],
+        ]
     }
 ]; 

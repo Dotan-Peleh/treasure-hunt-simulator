@@ -62,6 +62,39 @@ export const generateBoardLayout = (config) => {
                 }
             }
         }
+    } else if (config.pathPattern === 'horizontal_stripes') {
+        // --- FIXED HORIZONTAL STRIPES PATTERN ---
+        grid = Array(rows).fill(null).map(() => Array(cols).fill('rock'));
+        // Bottom row start tiles
+        for (let c = 0; c < cols; c++) grid[8][c] = 'start';
+
+        // Row 7 full path
+        for (let c = 0; c < cols; c++) grid[7][c] = 'path1';
+
+        // Row 6 narrow vertical corridor
+        grid[6][3] = 'path1';
+
+        // Row 5 full path
+        for (let c = 0; c < cols; c++) grid[5][c] = 'path1';
+
+        // Row 4 narrow corridor
+        grid[4][3] = 'path1';
+
+        // Row 3 full path
+        for (let c = 0; c < cols; c++) grid[3][c] = 'path1';
+
+        // Row 2 alternating pattern
+        for (let c = 0; c < cols; c+=2) grid[2][c] = 'path1';
+
+        // Row 1 alternating pattern
+        for (let c = 0; c < cols; c+=2) grid[1][c] = 'path1';
+
+        // Top row path with key on last cell
+        for (let c = 0; c < cols-1; c++) grid[0][c] = 'path1';
+        grid[0][cols-1] = 'key';
+
+        keyPos = { r:0, c: cols-1 };
+
     } else {
         grid = Array(rows).fill(null).map(() => Array(cols).fill('rock'));
         // --- BOARD SANITIZATION AND SETUP ---
@@ -83,22 +116,22 @@ export const generateBoardLayout = (config) => {
         const layoutManager = new LayoutManager(grid, keyPos);
         grid = layoutManager.generateLayout(pathCount, config.pathPattern);
     
-        // Place extra free tiles by converting some rocks
-        const rockTiles = [];
-        for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-                if (grid[r][c] === 'rock') {
-                    rockTiles.push({ r, c });
-                }
+    // Place extra free tiles by converting some rocks
+    const rockTiles = [];
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            if (grid[r][c] === 'rock') {
+                rockTiles.push({ r, c });
             }
         }
+    }
 
-        // Shuffle the rock tiles and pick the first N to convert
-        rockTiles.sort(() => Math.random() - 0.5);
-        for (let i = 0; i < Math.min(freeTileCount, rockTiles.length); i++) {
-            const tile = rockTiles[i];
-            grid[tile.r][tile.c] = 'free';
-        }
+    // Shuffle the rock tiles and pick the first N to convert
+    rockTiles.sort(() => Math.random() - 0.5);
+    for (let i = 0; i < Math.min(freeTileCount, rockTiles.length); i++) {
+        const tile = rockTiles[i];
+        grid[tile.r][tile.c] = 'free';
+    }
     }
     
     // 5. Run accessibility validation for ALL grids (custom and procedural)
@@ -116,22 +149,46 @@ export const generateBoardLayout = (config) => {
         }
     }
 
-    // 2. Carve out the standard 3x2 start area
-    for (let r = 7; r < 9; r++) {
-        for (let c = 0; c < 3; c++) {
-            grid[r][c] = 'start';
-        }
+    // 2. NEW START AREA — make the ENTIRE bottom row free/start tiles so players have
+    //    a full 7-tile runway at the bottom. We still keep the traditional 3 tiles
+    //    in the row above (row index 7) so the starting zone is 10 tiles in total.
+
+    // Bottom row (row index 8 ‑ zero-based) → start/free across all columns.
+    for (let c = 0; c < cols; c++) {
+        grid[8][c] = 'start';
     }
 
-    // 3. Force the two adjacent free tiles
-    const extraCoords = [ {r:7,c:3}, {r:8,c:3} ];
-    extraCoords.forEach(({r,c})=>{ grid[r][c]='free'; });
+    // NOTE: We no longer add extra start tiles in the row above; only the bottom
+    // row is marked as the starting/free zone.
 
     
     // 4. Place three single-chain generators in fixed, standard positions
-    grid[8][0] = 'generator_orange';
-    grid[8][1] = 'generator_blue';
-    grid[8][2] = 'generator_green';
+    const generatorOrder = ['orange','blue','green'];
+    const availableColors = item_chains.map(c=>c.color);
+    let genCol = 0;
+    generatorOrder.forEach(color=>{
+        if(availableColors.includes(color)){
+            grid[8][genCol] = `generator_${color}`;
+            genCol++;
+        }
+    });
+    // Fill remaining start cells with 'free' if generator not placed
+    for(;genCol<3;genCol++){
+        grid[8][genCol] = 'free';
+    }
+
+    // Place a single primary generator in a fixed position
+    const primaryChain = item_chains.find(c => c.color === 'orange') || item_chains[0];
+    if (primaryChain) {
+        grid[8][1] = `generator_${primaryChain.color}`;
+    }
+
+    // Fill the rest of the bottom row with 'free'
+    for (let c = 0; c < 3; c++) {
+        if (c !== 1) {
+            grid[8][c] = 'free';
+        }
+    }
 
 
     // The rest of the function (tile creation, cost assignment, analysis) remains the same
@@ -140,9 +197,9 @@ export const generateBoardLayout = (config) => {
     const tiles = [];
     
     // Ensure we have the 3 standard chains with correct levels for generator instantiation
-    const orangeChain = item_chains.find(c => c.color === 'orange') || { chain_name: 'Energy Cell', levels: 10, color: 'orange' };
-    const blueChain = item_chains.find(c => c.color === 'blue') || { chain_name: 'Data Chip', levels: 8, color: 'blue' };
-    const greenChain = item_chains.find(c => c.color === 'green') || { chain_name: 'Bio Fuel', levels: 8, color: 'green' };
+    const orangeChain = item_chains.find(c => c.color === 'orange');
+    const blueChain   = item_chains.find(c => c.color === 'blue');
+    const greenChain  = item_chains.find(c => c.color === 'green');
     
     // Collect all path tiles together for processing
     const pathTiles = [];
@@ -204,7 +261,7 @@ export const generateBoardLayout = (config) => {
         // CRITICAL: Bottom tiles (higher row numbers) should be EASIER (lower levels)
         // Top tiles (lower row numbers) should be HARDER (higher levels)
         const sortedTiles = [...pathTiles].sort((a, b) => b.r - a.r); // Bottom to top
-        const allChains = [orangeChain, blueChain, greenChain];
+        const allChains = item_chains; // only the chains present in config
         
         // PROGRESSIVE DIFFICULTY SYSTEM
         // Bottom tiles (start of path): Level 1-2 (very accessible start)

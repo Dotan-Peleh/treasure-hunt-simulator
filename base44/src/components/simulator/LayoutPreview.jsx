@@ -778,57 +778,23 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
                     <Button size="sm" variant="outline" onClick={() => adjustPathLevels(1)}>Raise +1</Button>
                     <Button size="sm" variant="outline" onClick={() => adjustPathLevels(-1)}>Lower -1</Button>
                     <Button size="sm" variant="outline" onClick={balancePathToAverage}>Balance to Avg</Button>
-                    <Button size="sm" variant="secondary" onClick={() => {
-                      if (selectedPathIndex === null) return;
-                      const path = localAnalysis?.all_paths?.[selectedPathIndex];
-                      if (!path || !path.path) return;
-
-                      const stepCost = (level) => Math.pow(2, level - 1);
-
-                      const newTiles = localLayout.tiles.map(t => ({ ...t }));
-
-                      // Build working array of tile references for quicker cost update
-                      const pathTileRefs = path.path.map(coord => {
-                        const [r, c] = coord.split(',').map(Number);
-                        return newTiles.find(t => t.row === r + 1 && t.col === c + 1);
-                      }).filter(Boolean);
-
-                      const otherCosts = localAnalysis.path_costs.filter((_, idx) => idx !== selectedPathIndex);
-
-                      let currentCost = localAnalysis.path_costs[selectedPathIndex];
-                      let targetMax = ((otherCosts.length? (otherCosts.reduce((a,b)=>a+b,0)+currentCost)/(otherCosts.length+1):currentCost) *1.15);
-
-                      // Lower levels starting from highest until under threshold
-                      while (currentCost > targetMax) {
-                        let changed = false;
-                        // sort by level desc each loop to always lower highest first
-                        pathTileRefs.sort((a,b)=> (b.required_item_level||0)-(a.required_item_level||0));
-                        for(const tile of pathTileRefs){
-                          if(tile.required_item_level>1){
-                            tile.required_item_level -=1;
-                            const parts = tile.required_item_name.split(' L');
-                            tile.required_item_name = `${parts[0]} L${tile.required_item_level}`;
-                            currentCost -= stepCost(tile.required_item_level+1) - stepCost(tile.required_item_level);
-                            changed = true;
-                            if(currentCost <= targetMax) break;
-                          }
+                    <Button size="sm" variant="destructive" onClick={() => {
+                      const newTiles = localLayout.tiles.map(t => {
+                        if (!t.required_item_level || t.required_item_level <= 2) return t;
+                        const newTile = { ...t };
+                        const newLevel = newTile.required_item_level - 1;
+                        newTile.required_item_level = newLevel;
+                        if (newTile.required_item_name) {
+                          const parts = newTile.required_item_name.split(' L');
+                          newTile.required_item_name = `${parts[0]} L${newLevel}`;
                         }
-                        if(!changed) break; // cannot lower further
-                      }
-
-                      // Recompute average with new cost
-                      const newCosts = [...localAnalysis.path_costs];
-                      newCosts[selectedPathIndex] = Math.ceil(currentCost);
-                      const newAnalysis = { ...localAnalysis, path_costs: newCosts };
-                      if(newAnalysis.all_paths && newAnalysis.all_paths[selectedPathIndex]){
-                         newAnalysis.all_paths = [...newAnalysis.all_paths];
-                         newAnalysis.all_paths[selectedPathIndex] = { ...newAnalysis.all_paths[selectedPathIndex], cost: Math.ceil(currentCost) };
-                      }
-
-                      setLocalLayout({ ...localLayout, tiles: newTiles });
-                      setLocalAnalysis(recalculateAnalysisMetrics(localAnalysis, newCosts));
+                        return newTile;
+                      });
+                      const newLayout = { ...localLayout, tiles: newTiles };
+                      setLocalLayout(newLayout);
+                      setTimeout(() => rebuildAnalysisFromTiles(newLayout), 0);
                     }}>
-                      Balance ≤15%
+                      -1 to All Levels
                     </Button>
                   </div>
                 )}

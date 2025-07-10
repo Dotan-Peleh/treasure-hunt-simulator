@@ -4,9 +4,9 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Input } from '@/components/ui/input';
-import { X, Save } from 'lucide-react';
+import { X, Save, Bomb } from 'lucide-react';
 
-const TILE_TYPES = ['free', 'rock', 'locked', 'semi_locked', 'key', 'chest'];
+const TILE_TYPES = ['free', 'rock', 'locked', 'semi_locked', 'key', 'chest', 'generator'];
 
 export default function TileEditPanel({ tile, onUpdate, itemChains, onClose }) {
   const [editState, setEditState] = useState(null);
@@ -30,6 +30,7 @@ export default function TileEditPanel({ tile, onUpdate, itemChains, onClose }) {
         ...editState,
         required_item_name: `${requiredItemChain?.chain_name || itemChains[0].chain_name} L${editState.required_item_level}`,
         required_item_chain_color: requiredItemChain?.color || itemChains[0].color,
+        drops_bomb: editState.drops_bomb || false,
     };
     onUpdate(updateData);
     onClose();
@@ -63,7 +64,13 @@ export default function TileEditPanel({ tile, onUpdate, itemChains, onClose }) {
           <Label htmlFor="tile-type">Tile Type</Label>
           <Select
             value={editState.tile_type}
-            onValueChange={(value) => setEditState(p => ({ ...p, tile_type: value }))}
+            onValueChange={(value) => {
+              const newState = { ...editState, tile_type: value };
+              if (value !== 'generator') {
+                newState.item = null;
+              }
+              setEditState(newState);
+            }}
           >
             <SelectTrigger id="tile-type">
               <SelectValue />
@@ -124,8 +131,54 @@ export default function TileEditPanel({ tile, onUpdate, itemChains, onClose }) {
             </div>
           </>
         )}
+
+        {(editState.tile_type === 'semi_locked' || editState.tile_type === 'locked') && (
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="drop-bomb"
+              checked={editState.drops_bomb || false}
+              onChange={(e)=>setEditState(p=>({...p,drops_bomb:e.target.checked}))}
+            />
+            <Label htmlFor="drop-bomb">Drops Bomb on Unlock</Label>
+          </div>
+        )}
+
+        {editState.tile_type === 'generator' && (
+          <div className="pt-2">
+            <Label>Generator Chain</Label>
+            <Select
+              value={editState.item?.chains?.[0]?.color || ''}
+              onValueChange={(color) => {
+                const chain = itemChains.find(c => c.color === color);
+                if (chain) {
+                  setEditState(p => ({
+                    ...p,
+                    item: { id: `gen-${Date.now()}`, type: 'generator', chains: [chain] }
+                  }));
+                }
+              }}
+            >
+              <SelectTrigger className="mt-1">
+                <SelectValue placeholder="Select a chain..." />
+              </SelectTrigger>
+              <SelectContent>
+                {itemChains.map(chain => (
+                  <SelectItem key={chain.color} value={chain.color} disabled={chain.isCrystal}>
+                    {chain.chain_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
       </CardContent>
-      <CardFooter>
+      <CardFooter className="flex flex-col gap-2">
+        {tile.item?.type === 'bomb' ? (
+            <Button variant="destructive" onClick={()=>{onUpdate({ item:null }); onClose();}}>Remove Bomb</Button>
+        ) : (
+            <Button variant="outline" onClick={()=>{onUpdate({ item:{ id:`bomb-${Date.now()}`, type:'bomb' } }); onClose();}}>Add Bomb</Button>
+        )}
         <Button onClick={handleSave} className="w-full">
             <Save className="w-4 h-4 mr-2" />
             Save Changes
