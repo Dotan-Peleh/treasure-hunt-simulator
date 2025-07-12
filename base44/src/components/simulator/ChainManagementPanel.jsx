@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Trash2 } from 'lucide-react';
 
-export default function ChainManagementPanel({ chains, onRemoveChain }) {
+export default function ChainManagementPanel({ chains, onRemoveChain, onAddPurpleChain }) {
   if (!chains || chains.length <= 1) {
     return (
       <Card>
@@ -25,6 +25,13 @@ export default function ChainManagementPanel({ chains, onRemoveChain }) {
         <CardTitle>Manage Item Chains</CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
+        <Button 
+            onClick={onAddPurpleChain} 
+            disabled={chains.some(c => c.color === 'purple')}
+            className="w-full mb-2"
+        >
+            Add Purple Chain
+        </Button>
         {chains.map((chain) => (
           <div key={chain.color} className="flex items-center justify-between p-2 border rounded-lg">
             <div className="flex items-center gap-2">

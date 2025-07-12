@@ -25,16 +25,17 @@ const EventConfigForm = ({ onConfigCreate, isSimulating, showFullAnalysis = fals
     duration_hours: 72,
     layout_id: 1,
     item_chains: [
-      { chain_name: 'Energy Cell', color: 'orange', levels: 12 },
-      { chain_name: 'Data Chip', color: 'blue', levels: 8 },
-      { chain_name: 'Bio Fuel', color: 'green', levels: 10 },
+      { chain_name: 'Orange', color: 'orange', levels: 12, crossChainMergeLevel: 4 },
+      { chain_name: 'Blue', color: 'blue', levels: 8, isBlueGeneratorSource: true, blueGeneratorUses: 5 },
+      { chain_name: 'Green', color: 'green', levels: 10 },
       { 
-        chain_name: 'Crystal', 
+        chain_name: 'Purple', 
         color: 'purple', 
         levels: 8, 
-        isCrystal: true, 
-        crossChainMergeLevel: 4, 
-        crystalGeneratorUses: 5 
+        isCrystal: true,
+        crossChainMergeLevel: 1,
+        crystalGeneratorUses: 5,
+        crystalMergePair: ['orange','green'],
       },
     ],
     milestoneCount: 3,
@@ -86,27 +87,19 @@ const EventConfigForm = ({ onConfigCreate, isSimulating, showFullAnalysis = fals
     }
   }, [currentLayout, config.item_chains]);
 
+  const handleMilestoneRewardChange = (index, value) => {
+    const newMilestones = [...config.milestones];
+    // Ensure value is a number and not negative
+    const rewardValue = Math.max(0, parseInt(value, 10) || 0);
+    newMilestones[index] = { ...newMilestones[index], reward: rewardValue };
+    setConfig(prev => ({ ...prev, milestones: newMilestones }));
+  };
+
   const generateAndSetConfig = () => {
       if (!onConfigCreate) return;
-
-      const dynamicMilestones = [];
-      const baseReward = 25;
-      const rewardIncrement = 15;
-      const rowPositions = [7, 5, 3];
-
-      for (let i = 0; i < config.milestoneCount; i++) {
-          dynamicMilestones.push({
-              row: rowPositions[i],
-              reward: baseReward + (i * rewardIncrement)
-          });
-      }
-      
-      const finalConfig = {
-          ...config,
-          milestones: dynamicMilestones,
-      };
-
-      onConfigCreate(finalConfig);
+      // The old logic for dynamic milestones is removed.
+      // We now pass the config directly as it comes from the state.
+      onConfigCreate(config);
   };
 
   const handleInputChange = (e) => setConfig(prev => ({ ...prev, [e.target.name]: e.target.value }));
@@ -116,7 +109,9 @@ const EventConfigForm = ({ onConfigCreate, isSimulating, showFullAnalysis = fals
   const removeItemChain = (index) => setConfig(prev => ({ ...prev, item_chains: prev.item_chains.filter((_, i) => i !== index) }));
   const handleItemChainChange = (index, field, value) => {
     const newChains = [...config.item_chains];
-    newChains[index][field] = value;
+    const chainToUpdate = { ...newChains[index] };
+    chainToUpdate[field] = value;
+    newChains[index] = chainToUpdate;
     setConfig(prev => ({ ...prev, item_chains: newChains }));
   };
 
@@ -161,13 +156,21 @@ const EventConfigForm = ({ onConfigCreate, isSimulating, showFullAnalysis = fals
             <AccordionItem value="item-2">
                 <AccordionTrigger>Milestone Rewards</AccordionTrigger>
                 <AccordionContent>
-                    <div className="space-y-2 mt-2">
-                        <Label>Number of Milestones: {config.milestoneCount}</Label>
-                        <Slider 
-                            value={[config.milestoneCount]}
-                            onValueChange={(value) => setConfig(prev => ({ ...prev, milestoneCount: value[0] }))}
-                            min={1} max={3} step={1} 
-                        />
+                    <div className="space-y-4 mt-2 p-2">
+                        <p className="text-sm text-slate-500">Set the Energy reward for crossing each milestone line.</p>
+                        {(config.milestones || []).map((milestone, index) => (
+                            <div key={index} className="flex items-center justify-between gap-4">
+                                <Label htmlFor={`milestone-reward-${index}`}>Milestone {index + 1} (Row {milestone.row})</Label>
+                                <Input 
+                                    id={`milestone-reward-${index}`}
+                                    type="number"
+                                    value={milestone.reward}
+                                    onChange={(e) => handleMilestoneRewardChange(index, e.target.value)}
+                                    className="w-28"
+                                    min="0"
+                                />
+                            </div>
+                        ))}
                     </div>
                 </AccordionContent>
             </AccordionItem>
@@ -205,6 +208,54 @@ const EventConfigForm = ({ onConfigCreate, isSimulating, showFullAnalysis = fals
                                             <Label>Generator Charges: {chain.crystalGeneratorUses}</Label>
                                             <Slider value={[chain.crystalGeneratorUses]} onValueChange={(val) => handleItemChainChange(index, 'crystalGeneratorUses', val[0])} min={1} max={10} step={1} />
                                         </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div>
+                                                <Label>Merge Chain A</Label>
+                                                <Select
+                                                    value={chain.crystalMergePair?.[0]}
+                                                    onValueChange={(color) => {
+                                                        const newPair = [color, chain.crystalMergePair?.[1]];
+                                                        handleItemChainChange(index, 'crystalMergePair', newPair);
+                                                    }}
+                                                >
+                                                    <SelectTrigger><SelectValue /></SelectTrigger>
+                                                    <SelectContent>
+                                                        {config.item_chains.filter(c => !c.isCrystal).map(c => (
+                                                            <SelectItem key={c.color} value={c.color}>{c.chain_name}</SelectItem>
+                                                        ))}
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                            <div>
+                                                <Label>Merge Chain B</Label>
+                                                <Select
+                                                    value={chain.crystalMergePair?.[1]}
+                                                    onValueChange={(color) => {
+                                                        const newPair = [chain.crystalMergePair?.[0], color];
+                                                        handleItemChainChange(index, 'crystalMergePair', newPair);
+                                                    }}
+                                                >
+                                                    <SelectTrigger><SelectValue /></SelectTrigger>
+                                                    <SelectContent>
+                                                        {config.item_chains.filter(c => !c.isCrystal).map(c => (
+                                                            <SelectItem key={c.color} value={c.color}>{c.chain_name}</SelectItem>
+                                                        ))}
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                                {chain.color === 'orange' && (
+                                    <div className="pt-4 mt-4 border-t">
+                                        <Label>Required Merge Level: {chain.crossChainMergeLevel}</Label>
+                                        <Slider value={[chain.crossChainMergeLevel]} onValueChange={(val) => handleItemChainChange(index, 'crossChainMergeLevel', val[0])} min={1} max={8} step={1} />
+                                    </div>
+                                )}
+                                {chain.color === 'blue' && (
+                                    <div className="pt-4 mt-4 border-t">
+                                        <Label>Generator Charges: {chain.blueGeneratorUses}</Label>
+                                        <Slider value={[chain.blueGeneratorUses]} onValueChange={(val) => handleItemChainChange(index, 'blueGeneratorUses', val[0])} min={1} max={10} step={1} />
                                     </div>
                                 )}
                             </div>
