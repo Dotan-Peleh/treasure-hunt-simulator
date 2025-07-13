@@ -3,7 +3,7 @@ import { Badge } from '@/components/ui/badge';
 import PropTypes from 'prop-types';
 import {
   Lock, Gem, Zap, HelpCircle, Mountain, Flag,
-  Circle, Square, Triangle, Shield, Star, Hexagon, Crown, Key
+  Circle, Square, Triangle, Shield, Star, Hexagon, Crown, Key, Bomb
 } from 'lucide-react';
 
 const getLevelIcon = (level) => {
@@ -36,6 +36,8 @@ export default function InteractiveBoard({
   isEditing,
   pathAnalysis,
   isLayoutVisible,
+  bombHoverIndex,
+  setBombHoverIndex,
 }) {
 
   const colorMap = {
@@ -63,7 +65,7 @@ export default function InteractiveBoard({
 
   const renderItem = (item) => {
     if (item.type === 'generator') {
-      const color = item.chains[0]?.color || 'orange'; // Default to orange
+      const color = item.chains[0]?.color || 'orange';
       const generatorClass = itemBgColors[color] || 'bg-gray-500';
 
       return (
@@ -71,11 +73,25 @@ export default function InteractiveBoard({
           <div className={`relative w-full h-full ${generatorClass} rounded-full flex items-center justify-center shadow-md`}>
             <Zap className="w-5 h-5 md:w-6 md:h-6 text-white" />
           </div>
+          {item.isCrystal && item.uses > 0 && (
+              <Badge variant="secondary" className="text-[10px] absolute -top-1 -right-1 px-1.5 py-0.5 h-auto">
+                  {item.uses}
+              </Badge>
+          )}
           {item.isStart && (
             <div className="absolute -top-1 -right-1 bg-white p-0.5 rounded-full shadow-lg">
               <Flag className="w-3 h-3 text-red-500" />
             </div>
           )}
+        </div>
+      );
+    }
+
+    // Hammer item
+    if (item.type === 'bomb') {
+      return (
+        <div className="relative w-10 h-10 md:w-12 md:h-12 rounded-full shadow-md cursor-pointer transition-transform hover:scale-110 bg-gray-700 flex items-center justify-center">
+          <Bomb className="w-5 h-5 md:w-6 md:h-6 text-white" />
         </div>
       );
     }
@@ -130,6 +146,7 @@ export default function InteractiveBoard({
 
         {board.map((tile, index) => {
           const isTileVisible = isLayoutVisible || isEditing || tile.discovered;
+          const selectedItem = board[selectedTileIndex];
 
           const getTileClassName = () => {
             if (!isTileVisible) {
@@ -152,24 +169,43 @@ export default function InteractiveBoard({
 
           const showRequirement = !tile.unlocked && !tile.item && (tile.tile_type === 'semi_locked' || (tile.tile_type === 'locked' && isLayoutVisible));
 
+          let isBombPreview = false;
+          if (bombHoverIndex !== null) {
+            const hoverTile = board[bombHoverIndex];
+            if (hoverTile.item?.type === 'bomb' && hoverTile.discovered) {
+              const isCenter = index === bombHoverIndex;
+              const dRow = Math.abs(tile.row - hoverTile.row);
+              const dCol = Math.abs(tile.col - hoverTile.col);
+              if (isCenter || (dRow <= 1 && dCol <= 1)) {
+                  isBombPreview = true;
+              }
+            }
+          }
+          const previewRing = isBombPreview ? ' ring-2 ring-red-500 animate-pulse' : '';
+
+          const isSpecialItemHidden = !isLayoutVisible && !isEditing && !tile.discovered && (tile.item?.type === 'generator' || tile.item?.type === 'bomb');
+
           return (
             <div
               key={tile.id || index}
               onClick={() => onTileClick(index)}
+              onMouseEnter={() => setBombHoverIndex(index)}
+              onMouseLeave={() => setBombHoverIndex(null)}
               className={`
                 aspect-square rounded-md border flex items-center justify-center relative transition-all duration-200
                 ${getTileClassName()}
-                ${index === selectedTileIndex ? 'ring-2 ring-blue-500 z-10' : ''}
-                ${isEditing ? 'cursor-pointer' : (isTileVisible && (tile.item || tile.tile_type === 'semi_locked' || tile.tile_type === 'key')) ? 'cursor-pointer' : 'cursor-default'}
+                ${isBombPreview ? 'ring-2 ring-red-500 animate-pulse' : ''}
+                ${index === selectedTileIndex && !isBombPreview ? 'ring-2 ring-blue-500 z-10' : ''}
+                ${isEditing || (isTileVisible && !isSpecialItemHidden && (tile.item || tile.tile_type === 'semi_locked' || tile.tile_type === 'key')) ? 'cursor-pointer' : 'cursor-default'}
               `}
             >
-              {isTileVisible ? (
+              {isTileVisible && !isSpecialItemHidden ? (
                 <>
                   {/* If there's an actual item on the tile, render it. This takes priority. */}
                   {tile.item && renderItem(tile.item)}
 
                   {/* If we should show the tile's unlock requirement */}
-                  {showRequirement && (
+                  {(showRequirement || isSpecialItemHidden) && (
                     <div className="absolute inset-0 rounded-md flex flex-col items-center justify-center p-1 text-center z-0">
                       {/* Faded background icon for the required item */}
                       <div className={`w-6 h-6 rounded-full flex items-center justify-center mb-0.5 ${itemBgColors[tile.required_item_chain_color] || 'bg-gray-400'} opacity-70 shadow-inner`}>
@@ -221,4 +257,6 @@ InteractiveBoard.propTypes = {
     isEditing: PropTypes.bool,
     pathAnalysis: PropTypes.object,
     isLayoutVisible: PropTypes.bool,
+    bombHoverIndex: PropTypes.number,
+    setBombHoverIndex: PropTypes.func,
 };

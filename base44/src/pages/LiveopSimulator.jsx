@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Settings, Puzzle, RotateCcw, Download, Edit, Eye, DownloadCloud, ChevronLeft, ChevronRight, Flag } from 'lucide-react';
@@ -19,17 +19,67 @@ import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { recalculateAnalysis } from '../generation/analysis';
+import ChainManagementPanel from '../components/simulator/ChainManagementPanel';
+
+// Helper to apply default fields to chains
+const applyDefaultChainProps = (chains=[]) => chains.map(chain => {
+  switch (chain.color) {
+    case 'orange':
+      return { crossChainMergeLevel: 4, ...chain };
+    case 'blue':
+      return { blueGeneratorUses: 5, ...chain };
+    case 'purple':
+      return { isCrystal: true, crossChainMergeLevel: 1, crystalGeneratorUses: 5, crystalMergePair: ['orange','green'], ...chain };
+    default:
+      return chain;
+  }
+});
+
+// Ensure that the standard primary chains exist; if missing add defaults.
+const ensureStandardChains = (chains=[]) => {
+  const colorSet = new Set(chains.map(c=>c.color));
+  const defaults = {
+    orange: { chain_name: 'Orange', color: 'orange', levels: 12, crossChainMergeLevel: 4 },
+    blue:   { chain_name: 'Blue',   color: 'blue',   levels: 8,  blueGeneratorUses: 5 },
+    green:  { chain_name: 'Green',  color: 'green',  levels: 10 }
+  };
+  ['orange','blue','green'].forEach(color=>{ if(!colorSet.has(color)){ chains.push(defaults[color]); }});
+  return chains;
+};
 
 export default function LiveopSimulator() {
-  const [currentConfig, setCurrentConfig] = useState({
-    event_name: 'Default Event',
-    item_chains: [
-      { chain_name: 'Energy Cell', levels: 10, color: 'orange' },
-      { chain_name: 'Data Chip', levels: 8, color: 'blue' },
-      { chain_name: 'Bio Fuel', levels: 8, color: 'green' },
-    ],
-    milestones: [],
+
+  /* --------------------------------------------------
+     CONFIG STATE (persisted to localStorage)
+  -------------------------------------------------- */
+  const getDefaultConfig = () => ({
+      event_name: 'Default Event',
+      duration_hours: 72,
+      layout_id: 1,
+      milestoneCount: 3,
+      item_chains: applyDefaultChainProps([
+        { chain_name: 'Orange', color: 'orange', levels: 12 },
+        { chain_name: 'Blue',   color: 'blue',   levels: 8  },
+        { chain_name: 'Green',  color: 'green',  levels: 10 },
+        { chain_name: 'Purple', color: 'purple', levels: 8, crystalMergePair: ['orange','green'] },
+      ]),
+      crossChainMergeLevel: 4,
   });
+
+  const [currentConfig, setCurrentConfig] = useState(() => {
+      try {
+          const saved = localStorage.getItem('eventConfig');
+          if (saved) return JSON.parse(saved);
+      } catch { /* ignore */ }
+      return getDefaultConfig();
+  });
+
+  // Persist any config changes automatically
+  useEffect(() => {
+      try {
+          localStorage.setItem('eventConfig', JSON.stringify(currentConfig));
+      } catch { /* ignore */ }
+  }, [currentConfig]);
   const [initialLayout, setInitialLayout] = useState(null);
   const [boardTiles, setBoardTiles] = useState([]);
   const [playerState, setPlayerState] = useState({ credits: 200 });
@@ -50,6 +100,9 @@ export default function LiveopSimulator() {
   const [importedLayouts, setImportedLayouts] = useState([]);
   const [currentLayoutIndex, setCurrentLayoutIndex] = useState(0);
   const [importSourceConfig, setImportSourceConfig] = useState(null);
+  const [bombGiven, setBombGiven] = useState(false);
+  const [bombHoverIndex, setBombHoverIndex] = useState(null);
+  const [blueGeneratorCharges, setBlueGeneratorCharges] = useState({});
 
   const fileInputRef = useRef(null);
 
@@ -63,40 +116,106 @@ export default function LiveopSimulator() {
   
   const checkMilestones = (newBoard) => {
     if (!pathAnalysis || !pathAnalysis.milestones) return;
-    
+
     const newMilestoneStates = { ...milestoneStates };
-    let newCredits = playerState.credits;
+    let rewardTotal = 0;
     let milestoneTriggered = false;
 
     pathAnalysis.milestones.forEach(milestone => {
-        // Check if this milestone has already been claimed
-        if (newMilestoneStates[milestone.row]) {
-            return;
-        }
+        if (newMilestoneStates[milestone.row]) return; // already claimed
 
-        // Check if any tile in this milestone row is now discovered
-        const isRowDiscovered = newBoard.some(tile => 
-            tile.row === milestone.row && tile.discovered
-        );
+        // Detect any meaningful progress on or above the milestone row.
+        // Progress can be:
+        // 1) Discovering a new tile (fog-of-war cleared)
+        // 2) Unlocking a tile that was previously locked
+        // 3) Creating/Upgrading an item via merge (level increase or brand-new item)
+        const milestoneProgress = newBoard.some((tile, idx) => {
+            if (tile.row >= milestone.row) return false; // ignore tiles on/below the milestone line
 
-        if (isRowDiscovered) {
+            const before = boardTiles[idx];
+
+            // Safety – if we somehow lost map alignment, skip.
+            if (!before) return false;
+
+            // (1) Newly discovered tile
+            if (tile.discovered && !before.discovered) return true;
+
+            // (2) Tile unlocked state changed
+            if (tile.unlocked && !before.unlocked) return true;
+
+            // (3) Item merge/creation that results in a higher level or new item
+            const afterItem = tile.item;
+            const prevItem  = before.item;
+            if (afterItem) {
+                if (!prevItem) return true; // brand-new item placed
+                if (afterItem.level > (prevItem.level || 0)) return true; // upgraded
+            }
+
+            return false;
+        });
+
+        if (milestoneProgress) {
             newMilestoneStates[milestone.row] = { discovered: true, claimed: true };
-            newCredits += milestone.reward;
-            showNotification(`Milestone Reached! +${milestone.reward} Energy!`, "success");
+            rewardTotal += milestone.reward;
+            showNotification(`Milestone Reached! +${milestone.reward} Energy!`, "success", 500);
+            showCelebration('energy', milestone.reward);
             milestoneTriggered = true;
         }
     });
 
     if (milestoneTriggered) {
         setMilestoneStates(newMilestoneStates);
-        setPlayerState(prev => ({ ...prev, credits: newCredits }));
+        setPlayerState(prev => ({ ...prev, credits: prev.credits + rewardTotal }));
     }
+  };
+
+  // Utility: sanitize tiles to respect currentConfig.item_chains (remove unsupported chains)
+  const sanitizeTilesForChains = (tiles, allowedChains) => {
+    const allowedColors = allowedChains.map(c=>c.color);
+    const pickRandomChain = () => allowedChains[Math.floor(Math.random()*allowedChains.length)];
+    return tiles.map(tile=>{
+      const newTile = { ...tile };
+      // Handle generator
+      if(newTile.item?.type==='generator'){
+        const color = newTile.item.chains?.[0]?.color;
+        if(!allowedColors.includes(color)){
+          // remove generator => make free tile
+          newTile.item = null;
+          newTile.tile_type = 'free';
+        }
+      }
+      // Handle items on board
+      if(newTile.item?.type==='item'){
+        if(!allowedColors.includes(newTile.item.chain_color)){
+          const replacement = pickRandomChain();
+          const lvl = newTile.item.level;
+          newTile.item = {
+            ...newTile.item,
+            chain_color: replacement.color,
+            chain_name: replacement.chain_name,
+            chain: replacement,
+            name: `${replacement.chain_name} L${lvl}`
+          };
+        }
+      }
+      // Handle semi_locked requirement
+      if(newTile.required_item_chain_color && !allowedColors.includes(newTile.required_item_chain_color)){
+        const replacement = pickRandomChain();
+        const lvl = newTile.required_item_level;
+        newTile.required_item_chain_color = replacement.color;
+        if(newTile.required_item_name){
+          newTile.required_item_name = `${replacement.chain_name} L${lvl}`;
+        }
+      }
+      return newTile;
+    });
   };
 
   const handleConfigCreate = (config) => {
     setIsSimulating(true);
     const { tiles, analysis } = generateBoardLayout(config);
-    loadLayoutData({ tiles, analysis, config });
+    const sanitizedTiles = sanitizeTilesForChains(tiles, config.item_chains);
+    loadLayoutData({ tiles: sanitizedTiles, analysis, config });
     showNotification("New simulation created successfully!", "success");
     setIsSimulating(false);
   };
@@ -125,21 +244,30 @@ export default function LiveopSimulator() {
 
   const loadSelectedLayout = (layout, sourceConfig, isBatchLoad = false) => {
     const newConfig = { ...(sourceConfig || currentConfig), ...layout.config };
-    setBoardTiles(layout.tiles);
-    setInitialLayout(JSON.parse(JSON.stringify(layout.tiles)));
-    setPathAnalysis(layout.analysis);
+    newConfig.item_chains = ensureStandardChains(applyDefaultChainProps(newConfig.item_chains || []));
+    const sanitizedTiles = sanitizeTilesForChains(layout.tiles, newConfig.item_chains);
+    setBoardTiles(sanitizedTiles);
+    setInitialLayout(JSON.parse(JSON.stringify(sanitizedTiles)));
+    let analysisWithMilestones = layout.analysis;
+    if (analysisWithMilestones && (!analysisWithMilestones.milestones || analysisWithMilestones.milestones.length===0)) {
+       const defaultRows = [7,5,3];
+       const dynamicMilestones = defaultRows.slice(0, newConfig.milestoneCount || 3).map((rowIdx,i)=>({row:rowIdx,reward:25+15*i}));
+       analysisWithMilestones = { ...analysisWithMilestones, milestones: dynamicMilestones };
+    }
+    setPathAnalysis(analysisWithMilestones);
     setCurrentConfig(newConfig);
     if (!isBatchLoad) {
         // If loading a single one from an already imported batch, update the index
         const idx = importedLayouts.findIndex(l => l.id === layout.id);
         if(idx !== -1) setCurrentLayoutIndex(idx);
     }
-    resetGame(true); // Soft reset
+    setIsLayoutVisible(true); // Always show the layout on import
+    resetGame(); // Soft reset
   };
 
-  const resetGame = (isChangingLayout = false) => {
-    if (!isChangingLayout && initialLayout) {
-      // Restore the board to its initial generated state
+  const resetGame = () => {
+    if (initialLayout) {
+      // Always restore pristine copy of starting board
       setBoardTiles(JSON.parse(JSON.stringify(initialLayout)));
     }
 
@@ -148,11 +276,14 @@ export default function LiveopSimulator() {
     setSelectedTileIndex(null);
     setMilestoneStates({}); 
     setHintActive(false);
+    setBombGiven(false);
+    setBombHoverIndex(null);
+    setBlueGeneratorCharges({});
     setChestHintArea([]);
     setIsEditingBoard(false); // Reset editing mode
     setIsLayoutVisible(false); // Hide full layout on reset
     
-    showNotification("Simulation has been reset with current layout.", "info");
+    showNotification("Simulation has been reset.", "info");
   };
 
   const handleLoadAll = () => {
@@ -242,8 +373,64 @@ export default function LiveopSimulator() {
 
   const handleTileUpdate = (index, newTileData) => {
     const newBoard = [...boardTiles];
-    newBoard[index] = { ...newBoard[index], ...newTileData };
+    const oldTile = newBoard[index];
+    const updatedTile = { ...oldTile, ...newTileData };
+    newBoard[index] = updatedTile;
+
+    const wasGeneratorPlaced = newTileData.item?.type === 'generator' && oldTile.item?.type !== 'generator';
+
+    if (wasGeneratorPlaced && (updatedTile.tile_type === 'semi_locked' || updatedTile.tile_type === 'locked')) {
+        const generatorChain = updatedTile.item.chains[0];
+        const { row, col } = updatedTile;
+        const generatorCoord = `${row - 1},${col - 1}`;
+
+        if (pathAnalysis && pathAnalysis.all_paths) {
+            for (const path of pathAnalysis.all_paths) {
+                const generatorPosInPath = path.path.indexOf(generatorCoord);
+                
+                if (generatorPosInPath !== -1 && generatorPosInPath < path.path.length - 1) {
+                    const nextCoord = path.path[generatorPosInPath + 1];
+                    const [r, c] = nextCoord.split(',').map(Number);
+                    const nextTileIndex = newBoard.findIndex(t => t.row === r + 1 && t.col === c + 1);
+
+                    if (nextTileIndex !== -1) {
+                        const tileToUpdate = newBoard[nextTileIndex];
+                        const newLevel = Math.max(2, (tileToUpdate.required_item_level || 3) - 1);
+                        
+                        tileToUpdate.required_item_chain_color = generatorChain.color;
+                        tileToUpdate.required_item_name = `${generatorChain.chain_name} L${newLevel}`;
+                        tileToUpdate.required_item_level = newLevel;
+
+                        showNotification(`Path updated to use ${generatorChain.chain_name}.`, "success");
+                        
+                        const newAnalysis = recalculateAnalysis({ ...currentConfig, tiles: newBoard, analysis: pathAnalysis });
+                        setPathAnalysis(newAnalysis);
+                        
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     setBoardTiles(newBoard);
+};
+
+  const revealAdjacentTiles = (board, tileIndex) => {
+      const tile = board[tileIndex];
+      if (!tile) return;
+      const { row, col } = tile;
+      const adjacentOffsets = [{r:-1,c:0},{r:1,c:0},{r:0,c:-1},{r:0,c:1}];
+      
+      adjacentOffsets.forEach(offset => {
+          const neighborIndex = board.findIndex(t => t.row === row + offset.r && t.col === col + offset.c);
+          if (neighborIndex !== -1 && !board[neighborIndex].discovered) {
+              board[neighborIndex] = { ...board[neighborIndex], discovered: true };
+              if (board[neighborIndex].tile_type === 'locked') {
+                  board[neighborIndex].tile_type = 'semi_locked';
+              }
+          }
+      });
   };
 
   const handleTileClick = (clickedIndex) => {
@@ -254,231 +441,282 @@ export default function LiveopSimulator() {
 
     const clickedTile = boardTiles[clickedIndex];
 
+    // Bomb is a standalone action, handle it first.
+    if (clickedTile.item?.type === 'bomb') {
+      const newBoard = [...boardTiles];
+      const { row, col } = clickedTile;
+      for (let r_offset = -1; r_offset <= 1; r_offset++) {
+        for (let c_offset = -1; c_offset <= 1; c_offset++) {
+          if (r_offset === 0 && c_offset === 0) continue;
+          const neighborIndex = newBoard.findIndex(t => t.row === row + r_offset && t.col === col + c_offset);
+          if (neighborIndex !== -1) {
+            newBoard[neighborIndex] = { ...newBoard[neighborIndex], discovered: true };
+          }
+        }
+      }
+      newBoard[clickedIndex] = { ...newBoard[clickedIndex], item: null, tile_type: 'free' };
+      setBoardTiles(newBoard);
+      showNotification('💥 BOOM! Area revealed!', 'success');
+      setBombHoverIndex(null);
+      checkMilestones(newBoard);
+      return;
+    }
+    
+    // Rock is unclickable
     if (clickedTile.tile_type === 'rock') {
       return;
     }
 
-    // Handle generator click
-    if (clickedTile.item?.type === 'generator') {
-      const cost = 1;
-      if (playerState.credits < cost) {
-        showNotification("Not enough Energy!", "error");
-        return;
-      }
-      
-      const emptyTileIndex = findRandomEmptyTile();
-      if (emptyTileIndex === -1) {
-        return;
-      }
-      
-      // Deduct credits FIRST
-      setPlayerState(prev => ({ ...prev, credits: prev.credits - cost }));
+    const selectedTile = selectedTileIndex !== null ? boardTiles[selectedTileIndex] : null;
 
-      const generator = clickedTile.item;
-      const selectedChain = generator.chains[Math.floor(Math.random() * generator.chains.length)];
-      const itemLevel = generateItemLevel(selectedChain);
-
-      const newItem = {
-        id: `item-${Date.now()}`,
-        type: 'item',
-        name: `${selectedChain.chain_name} L${itemLevel}`,
-        chain_color: selectedChain.color,
-        level: itemLevel,
-        chain_name: selectedChain.chain_name,
-        chain: selectedChain,
-      };
-      
-      const newBoard = [...boardTiles];
-      newBoard[emptyTileIndex].item = newItem;
-      setBoardTiles(newBoard);
-      return;
-    }
-
-    // Handle item merging
-    if (clickedTile.item?.type === 'item') {
-      if (selectedTileIndex === null) {
+    // --- Case 1: NO ITEM IS CURRENTLY SELECTED ---
+    if (!selectedTile) {
+      if (clickedTile.item?.type === 'item') {
         setSelectedTileIndex(clickedIndex);
-      } else if (selectedTileIndex === clickedIndex) {
-        setSelectedTileIndex(null);
-      } else {
-        const selectedTile = boardTiles[selectedTileIndex];
+        return;
+      }
+      
+      if (clickedTile.item?.type === 'generator') {
+        const generatorId = clickedTile.item.id;
+        const generatorColor = clickedTile.item.chains[0]?.color;
+        const chargesLeftFromState = Object.prototype.hasOwnProperty.call(blueGeneratorCharges, generatorId) ? blueGeneratorCharges[generatorId] : undefined;
+        const currentCharges = (typeof chargesLeftFromState === 'number') ? chargesLeftFromState : clickedTile.item.uses;
+        const isLimitedBlueGen = generatorColor === 'blue' && typeof currentCharges === 'number';
+
+        if (isLimitedBlueGen) {
+            if (currentCharges <= 0) {
+                showNotification("This Blue Generator is depleted.", "error");
+                return;
+            }
+
+            const emptyTileIndex = findRandomEmptyTile();
+            if (emptyTileIndex === -1) return;
+            
+            const blueChain = clickedTile.item.chains[0];
+            const newItem = { id: `item-${Date.now()}`, type: 'item', name: `${blueChain.chain_name} L1`, level: 1, chain_color: blueChain.color, chain_name: blueChain.chain_name, chain: blueChain };
+
+            const newBoard = [...boardTiles];
+            newBoard[emptyTileIndex].item = newItem;
+            const newCharges = currentCharges - 1;
+            setBlueGeneratorCharges(prev => ({ ...prev, [generatorId]: newCharges }));
+
+            if (newCharges === 0) {
+                newBoard[clickedIndex].item = null;
+                newBoard[clickedIndex].tile_type = 'free';
+                showNotification('Blue Generator depleted and vanished!', 'info');
+            } else {
+                newBoard[clickedIndex].item.uses = newCharges;
+            }
+            setBoardTiles(newBoard);
+            checkMilestones(newBoard);
+            return;
+        }
+
+        // Standard (unlimited) generator logic
+        const cost = 1;
+        if (playerState.credits < cost) {
+          showNotification("Not enough Energy!", "error");
+          return;
+        }
+        const emptyTileIndex = findRandomEmptyTile();
+        if (emptyTileIndex === -1) return;
         
-        // NEW MERGE CHECK: Based on color and level, not name.
-        if (
-          selectedTile.item && // <-- FIX: Ensure selected tile has an item
-          selectedTile.item.chain_color === clickedTile.item.chain_color &&
-          selectedTile.item.level === clickedTile.item.level
-        ) {
-          // Find the authoritative chain from the current config based on color
-          let masterChain = currentConfig.item_chains.find(c => c.color === selectedTile.item.chain_color);
-          
-          // If the chain color was deleted from config, use the item's own data as a fallback
-          if (!masterChain) {
-            masterChain = selectedTile.item.chain || clickedTile.item.chain || {
-              chain_name: selectedTile.item.chain_name,
-              color: selectedTile.item.chain_color,
-              levels: Math.max(selectedTile.item.level + 2, 8)
-            };
-            showNotification(`Chain color "${masterChain.color}" not in config. Using item data as fallback.`, "info");
-          }
-          
-          if (selectedTile.item.level >= masterChain.levels) {
-            showNotification("This item is already at its maximum level.", "info");
-            setSelectedTileIndex(null);
+        setPlayerState(prev => ({ ...prev, credits: prev.credits - cost }));
+        const generator = clickedTile.item;
+        const selectedChain = generator.chains[Math.floor(Math.random() * generator.chains.length)];
+        const itemLevel = generateItemLevel(selectedChain);
+        const newItem = { id: `item-${Date.now()}`, type: 'item', name: `${selectedChain.chain_name} L${itemLevel}`, chain_color: selectedChain.color, level: itemLevel, chain_name: selectedChain.chain_name, chain: selectedChain };
+        const newBoard = [...boardTiles];
+        newBoard[emptyTileIndex].item = newItem;
+        setBoardTiles(newBoard);
+        checkMilestones(newBoard);
+        return;
+      }
+
+      if (clickedTile.tile_type === 'key' && !clickedTile.item) {
+          const { row, col } = clickedTile;
+          const isReachable = boardTiles.some(t => {
+            const dRow = Math.abs(t.row - row);
+            const dCol = Math.abs(t.col - col);
+            return t.unlocked && dRow <= 1 && dCol <= 1 && dRow + dCol > 0;
+          });
+
+          if (!isReachable) {
+            showNotification("You must clear a path to the key first!", "error");
             return;
           }
-
-          const newLevel = selectedTile.item.level + 1;
-          // Create the new item using the masterChain's properties
-          const mergedItem = {
-            id: `item-${Date.now()}`,
-            type: 'item',
-            name: `${masterChain.chain_name} L${newLevel}`, // Use current name
-            level: newLevel,
-            chain_color: masterChain.color, // Use current color
-            chain_name: masterChain.chain_name, // Use current name
-            chain: masterChain, // Store the full, up-to-date chain object
-          };
-          
+          const keyChain = currentConfig.item_chains.find(c => c.color === 'orange') || currentConfig.item_chains[0];
+          if (!keyChain) {
+            showNotification("No item chains configured to generate key item.", "error");
+            return;
+          }
+          const keyItem = { id: `key-${Date.now()}`, type: 'item', name: `${keyChain.chain_name} Key`, level: 1, chain_color: keyChain.color, chain_name: keyChain.chain_name, chain: keyChain };
           const newBoard = [...boardTiles];
-          newBoard[clickedIndex].item = mergedItem;
-          newBoard[selectedTileIndex].item = null;
-          
+          newBoard[clickedIndex] = { ...clickedTile, unlocked: true, tile_type: 'free', item: keyItem, discovered: true, isReservedForChest: true }; 
+          // Reveal adjacent tiles
+          const adjacentPositions = [ { r: row - 1, c: col }, { r: row + 1, c: col }, { r: row, c: col - 1 }, { r: row, c: col + 1 }];
+          adjacentPositions.forEach(pos => {
+              const adjacentIndex = newBoard.findIndex(t => t.row === pos.r && t.col === pos.c);
+              if (adjacentIndex !== -1) {
+                  newBoard[adjacentIndex].discovered = true;
+                  if (newBoard[adjacentIndex].tile_type === 'locked') {
+                      newBoard[adjacentIndex].tile_type = 'semi_locked';
+                  }
+              }
+          });
           setBoardTiles(newBoard);
           setSelectedTileIndex(null);
-          
-          showNotification(`Merged to ${mergedItem.name}!`, "success");
-          checkMilestones(newBoard); // Check milestones after merge
+          showNotification("🗝️ Key obtained! Take it to the chest to win!", "success");
+          checkMilestones(newBoard);
+          return;
+      }
 
+      if ((clickedTile.tile_type === 'semi_locked' || clickedTile.tile_type === 'locked') && !clickedTile.unlocked) {
+        if(selectedItem) {
+           // This case is for when an item is selected, but it's the wrong one.
+           // The canUnlock check handles the successful case.
         } else {
-          // More informative error messages
-          if (selectedTile.item && clickedTile.item) {
-            if (selectedTile.item.level !== clickedTile.item.level) {
-                showNotification(`Cannot merge items of different levels (L${selectedTile.item.level} vs L${clickedTile.item.level}).`, "error");
-            } else if (selectedTile.item.chain_color !== clickedTile.item.chain_color) {
-                showNotification(`Cannot merge items from different chains (visually different colors).`, "error");
+            // No item is selected, show hint.
+            if(clickedTile.required_item_chain_color === 'purple') {
+                showNotification("Merge a Level 1 Orange item with a Level 1 Green item to create it.", "info");
+            } else {
+                showNotification(`Requires a ${clickedTile.required_item_name} to unlock.`, "info");
             }
-          }
-          setSelectedTileIndex(clickedIndex);
         }
+        return;
       }
       return;
     }
-    
-    // Handle key tile - just pick up the key item
-    if (clickedTile.tile_type === 'key' && !clickedTile.item) {
-      // Check if the key is reachable by checking for an adjacent unlocked tile
-      const { row, col } = clickedTile;
-      const isReachable = boardTiles.some(t =>
-        t.unlocked && (
-          (Math.abs(t.row - row) === 1 && t.col === col && t.discovered) ||
-          (Math.abs(t.col - col) === 1 && t.row === row && t.discovered)
-        )
-      );
 
-      if (!isReachable) {
-        showNotification("You must clear a path to the key first!", "error");
-        return;
-      }
-
-      if (!currentConfig || !currentConfig.item_chains) {
-        showNotification("Configuration not loaded or item chains missing.", "error");
-        return;
-      }
-      const keyChain = currentConfig.item_chains.find(c => c.color === 'orange') || currentConfig.item_chains[0];
-      
-      if (!keyChain) {
-        showNotification("No item chains configured to generate key item.", "error");
-        return;
-      }
-
-      const keyItem = {
-        id: `key-${Date.now()}`,
-        type: 'item',
-        name: `${keyChain.chain_name} Key`,
-        level: 1, // Level doesn't matter for the key
-        chain_color: keyChain.color,
-        chain_name: keyChain.chain_name,
-        chain: keyChain,
-      };
-      
-      const newBoard = [...boardTiles];
-      // Mark the tile as unlocked, free, discovered, and reserved for chest (to prevent new items from spawning on it later)
-      newBoard[clickedIndex] = { ...clickedTile, unlocked: true, tile_type: 'free', item: keyItem, discovered: true, isReservedForChest: true }; 
-      setBoardTiles(newBoard);
-      setSelectedTileIndex(null);
-      showNotification("🗝️ Key obtained! Take it to the chest to win!", "success");
-      
-      // Reveal adjacent tiles (Fog of War) when a key is obtained
-      const adjacentPositions = [
-          { r: row - 1, c: col }, { r: row + 1, c: col },
-          { r: row, c: col - 1 }, { r: row, c: col + 1 }
-      ];
-      adjacentPositions.forEach(pos => {
-          const adjacentIndex = newBoard.findIndex(t => t.row === pos.r && t.col === pos.c);
-          if (adjacentIndex !== -1) {
-              newBoard[adjacentIndex].discovered = true;
-              if (newBoard[adjacentIndex].tile_type === 'locked') {
-                  newBoard[adjacentIndex].tile_type = 'semi_locked';
-              }
-          }
-      });
-      setBoardTiles(newBoard); // Update again with discovered state
-
-      checkMilestones(newBoard); // Check milestones after key obtain
-      return;
-    }
-    
-    // Handle unlocking tiles (semi_locked and locked only)
-    if ((clickedTile.tile_type === 'semi_locked' || clickedTile.tile_type === 'locked') && !clickedTile.unlocked) {
-        if(selectedTileIndex === null) {
-            showNotification(`Requires a ${clickedTile.required_item_name} to unlock.`, "info");
+    // --- Case 2: AN ITEM IS CURRENTLY SELECTED ---
+    if (selectedTile) {
+        if (selectedTileIndex === clickedIndex) {
+            setSelectedTileIndex(null);
             return;
         }
 
-        const selectedItem = boardTiles[selectedTileIndex].item;
-        
-        const isCompatible = selectedItem && 
-            selectedItem.chain_color === clickedTile.required_item_chain_color &&
-            selectedItem.level === clickedTile.required_item_level;
-            
-        if (isCompatible) {
-            const newBoard = [...boardTiles];
-            // The item from the selected tile is being "used up"
-            newBoard[selectedTileIndex].item = null;
+        const extractMergeData = (tile) => {
+            if (!tile) return null;
+            if (tile.item) return { chain_color: tile.item.chain_color, level: tile.item.level, hasRealItem: true };
+            if ((tile.tile_type === 'semi_locked' || tile.tile_type === 'locked') && tile.required_item_chain_color && !tile.unlocked) {
+                return { chain_color: tile.required_item_chain_color, level: tile.required_item_level, hasRealItem: false };
+            }
+            return null;
+        };
 
-            // SIMPLIFIED: Unlock the target tile and make it empty. No more "merge-to-unlock".
-            // This makes the progression clearer: you use an item to reveal more of the path.
-            newBoard[clickedIndex] = { ...clickedTile, unlocked: true, discovered: true, item: null };
-            showNotification("Path revealed!", "success");
-            
-            // Reveal adjacent tiles (Fog of War)
-            const { row, col } = clickedTile;
-            const adjacentPositions = [
-                { r: row - 1, c: col }, { r: row + 1, c: col },
-                { r: row, c: col - 1 }, { r: row, c: col + 1 }
-            ];
-            adjacentPositions.forEach(pos => {
-                const adjacentIndex = newBoard.findIndex(t => t.row === pos.r && t.col === pos.c);
-                if (adjacentIndex !== -1) {
-                    newBoard[adjacentIndex].discovered = true;
-                    if (newBoard[adjacentIndex].tile_type === 'locked') {
-                        newBoard[adjacentIndex].tile_type = 'semi_locked';
+        const leftData = extractMergeData(selectedTile);
+        const rightData = extractMergeData(clickedTile);
+
+        // --- MERGE LOGIC ---
+        if (leftData && rightData) {
+            const isSameLevel = leftData.level === rightData.level;
+
+            const clearTileItem = (board, index, data) => {
+                const tile = board[index];
+                if (data.hasRealItem) {
+                    tile.item = null;
+                } else {
+                    tile.required_item_name = undefined;
+                    tile.required_item_level = undefined;
+                    tile.required_item_chain_color = undefined;
+                    tile.unlocked = true;
+                    tile.tile_type = 'free';
+                }
+            };
+
+            // 1. Blue Generator Merge (Orange L4 + Orange L4)
+            const orangeChain = currentConfig.item_chains.find(c => c.color === 'orange');
+            const orangeSpecialLevel = orangeChain?.crossChainMergeLevel || 4;
+            const isOrangeMerge = leftData.chain_color === 'orange' && rightData.chain_color === 'orange';
+
+            if (isOrangeMerge && isSameLevel && leftData.level === orangeSpecialLevel) {
+                const blueChain = currentConfig.item_chains.find(c => c.color === 'blue');
+                if (blueChain) {
+                    const newGeneratorId = `blue-gen-${Date.now()}`;
+                    const newBoard = [...boardTiles];
+
+                    // Clear sources and reveal if placeholder was used
+                    if (!leftData.hasRealItem) revealAdjacentTiles(newBoard, selectedTileIndex);
+                    if (!rightData.hasRealItem) revealAdjacentTiles(newBoard, clickedIndex);
+                    clearTileItem(newBoard, selectedTileIndex, leftData);
+                    clearTileItem(newBoard, clickedIndex, rightData);
+                    
+                    const dropIndex = findRandomEmptyTile([selectedTileIndex, clickedIndex]);
+                    const targetIndex = dropIndex !== -1 ? dropIndex : clickedIndex;
+
+                    newBoard[targetIndex].item = { id: newGeneratorId, type: 'generator', chains: [blueChain], uses: blueChain.blueGeneratorUses || 3 };
+                    newBoard[targetIndex].discovered = true;
+                    setBlueGeneratorCharges(prev => ({ ...prev, [newGeneratorId]: blueChain.blueGeneratorUses || 3 }));
+                    
+                    setBoardTiles(newBoard);
+                    setSelectedTileIndex(null);
+                    showNotification('💧 Blue Generator created!', 'success');
+                    checkMilestones(newBoard);
+                    return;
+                }
+            }
+
+            // 2. Purple Item Merge (Cross-Chain, Real Items Only)
+            if (leftData.hasRealItem && rightData.hasRealItem && isSameLevel && leftData.chain_color !== rightData.chain_color) {
+                const crystalChain = currentConfig.item_chains.find(c => c.isCrystal);
+                const crossMergeLevel = crystalChain?.crossChainMergeLevel || 1;
+                if (leftData.level === crossMergeLevel) {
+                    const allowedPair = (crystalChain?.crystalMergePair || ['orange','green']).sort();
+                    const mergeColors = [leftData.chain_color, rightData.chain_color].sort();
+                    if (allowedPair.length === 2 && mergeColors[0] === allowedPair[0] && mergeColors[1] === allowedPair[1]) {
+                        const mergedItem = { id: `item-${Date.now()}`, type: 'item', name: `Purple L${crossMergeLevel}`, level: crossMergeLevel, chain_color: 'purple', chain_name: 'Purple', chain: crystalChain, isCrystal: true };
+                        const newBoard = [...boardTiles];
+                        newBoard[clickedIndex].item = mergedItem;
+                        newBoard[selectedTileIndex].item = null;
+                        setBoardTiles(newBoard);
+                        setSelectedTileIndex(null);
+                        showNotification('🔮 Purple item created!', 'success');
+                        checkMilestones(newBoard);
+                        return;
                     }
                 }
-            });
-
+            }
+            
+            // 3. Standard Merge (Same Chain, Real Items Only)
+            if (leftData.hasRealItem && rightData.hasRealItem && leftData.chain_color === rightData.chain_color && isSameLevel) {
+                const masterChain = currentConfig.item_chains.find(c => c.color === leftData.chain_color);
+                if (masterChain && leftData.level < masterChain.levels) {
+                    const newLevel = leftData.level + 1;
+                    const mergedItem = { id: `item-${Date.now()}`, type: 'item', name: `${masterChain.chain_name} L${newLevel}`, level: newLevel, chain_color: masterChain.color, chain_name: masterChain.chain_name, chain: masterChain };
+                    const newBoard = [...boardTiles];
+                    newBoard[clickedIndex].item = mergedItem;
+                    newBoard[selectedTileIndex].item = null;
+                    setBoardTiles(newBoard);
+                    setSelectedTileIndex(null);
+                    showNotification(`Merged to ${mergedItem.name}!`, "success");
+                    checkMilestones(newBoard);
+                    return;
+                }
+            }
+        }
+    
+        // --- UNLOCK LOGIC (if no merge happened) ---
+        const isUnlockable = (clickedTile.tile_type === 'semi_locked' || clickedTile.tile_type === 'locked') && !clickedTile.unlocked;
+        if (leftData?.hasRealItem && isUnlockable && leftData.chain_color === clickedTile.required_item_chain_color && leftData.level === clickedTile.required_item_level) {
+            const newBoard = [...boardTiles];
+            newBoard[selectedTileIndex].item = null;
+            const hadEmbeddedGenerator = clickedTile.item?.type === 'generator';
+            newBoard[clickedIndex] = { ...clickedTile, unlocked: true, discovered: true, item: hadEmbeddedGenerator ? clickedTile.item : null, tile_type: hadEmbeddedGenerator ? 'semi_locked' : 'free' };
+            revealAdjacentTiles(newBoard, clickedIndex);
             setBoardTiles(newBoard);
             setSelectedTileIndex(null);
-
-            // ALWAYS check milestones after a successful unlock/board change.
+            showNotification("Path revealed!", "success");
             checkMilestones(newBoard);
+            return;
+        }
+
+        // --- Fallback: Select the new tile or show an error ---
+        if (clickedTile.item) {
+            setSelectedTileIndex(clickedIndex);
         } else {
-            // More helpful error message
-            if (selectedItem) {
-                showNotification(`Incorrect item. Need: ${clickedTile.required_item_name} (Color: ${clickedTile.required_item_chain_color}, Level: ${clickedTile.required_item_level}). You have: ${selectedItem.name} (Color: ${selectedItem.chain_color}, Level: ${selectedItem.level}).`, "error");
-            } else {
-                showNotification(`Incorrect item. Requires ${clickedTile.required_item_name}.`, "error");
+            setSelectedTileIndex(null);
+            if (isUnlockable && selectedTile.item) {
+                showNotification(`Incorrect item. Need: ${clickedTile.required_item_name}. You have: ${selectedTile.item.name}.`, "error");
             }
         }
     }
@@ -503,6 +741,9 @@ export default function LiveopSimulator() {
       showCelebration('chest', 5000);
       showNotification("🎉 VICTORY! You've completed the event! 🎉", "success", 5000);
       
+      // Persist current board (after key removal) as new baseline so reset keeps edits/changes.
+      setInitialLayout(JSON.parse(JSON.stringify(newBoard)));
+
       // Reset after celebration
       setTimeout(() => resetGame(), 3000);
     } else {
@@ -528,31 +769,25 @@ export default function LiveopSimulator() {
 
   const handleToggleEditMode = () => {
     if (isEditingBoard) {
-        // When finishing editing, we need to re-run the analysis to get fresh data
-        // for the potentially modified board. We can do this by running the generator
-        // with a custom grid derived from the current tiles.
-
-        const tempGrid = Array(9).fill(null).map(() => Array(7).fill(null));
-        boardTiles.forEach(t => {
-            // This is a simplification; we lose some fidelity (e.g., path1 vs path2),
-            // but for re-analysis, mapping tile_type to a base grid type is sufficient.
-            const gridType = (t.tile_type === 'semi_locked' || t.tile_type === 'locked') ? 'path' : t.tile_type;
-            tempGrid[t.row - 1][t.col - 1] = gridType;
-        });
-
-        const { analysis } = generateBoardLayout({
+        // When finishing editing, re-run analysis on the modified board
+        const currentLayout = {
             ...currentConfig,
-            customGrid: tempGrid,
-        });
+            tiles: boardTiles,
+            analysis: pathAnalysis,
+        };
+        const newAnalysis = recalculateAnalysis(currentLayout);
+        setPathAnalysis(newAnalysis);
 
-        setPathAnalysis(analysis);
+        // Save the edited board as the new baseline for resets
         setInitialLayout(JSON.parse(JSON.stringify(boardTiles)));
+        
         showNotification("Board layout saved as the new baseline for this session.", "success");
     }
     setIsEditingBoard(p => !p);
   };
 
   const handleFlagTile = (clickedIndex) => {
+    if(clickedIndex===null){ showNotification("Select a tile first to toggle entry.","info"); return; }
     const newTiles = [...boardTiles];
     const tile = newTiles[clickedIndex];
     if (tile.tile_type !== 'semi_locked' && tile.tile_type !== 'bridge') {
@@ -616,9 +851,20 @@ export default function LiveopSimulator() {
       return;
     }
 
+    let analysisToExport = pathAnalysis;
+    if (isEditingBoard) {
+        const currentLayout = {
+            ...currentConfig,
+            tiles: boardTiles,
+            analysis: pathAnalysis,
+        };
+        analysisToExport = recalculateAnalysis(currentLayout);
+        showNotification("Analysis recalculated for export.", "info", 1500);
+    }
+
     const exportData = {
       config: currentConfig,
-      analysis: pathAnalysis, // Use the analysis from the state, which is now always fresh
+      analysis: analysisToExport,
       tiles: boardTiles.map(({ ...rest }) => rest),
     };
     const jsonString = JSON.stringify(exportData, null, 2);
@@ -750,13 +996,15 @@ export default function LiveopSimulator() {
     showNotification("The key's location has been narrowed down!", "success");
   };
 
-  const findRandomEmptyTile = () => {
+  const findRandomEmptyTile = (excludeIndices = []) => {
+    const excluded = Array.isArray(excludeIndices) ? excludeIndices : [excludeIndices];
     const emptyTiles = boardTiles
       .map((tile, index) => ({ tile, index }))
-      .filter(({ tile }) => 
-        (tile.tile_type === 'free' || tile.unlocked) && // Tile is generally available
-        !tile.item && // Tile has no item
-        !tile.isReservedForChest // Tile is not reserved as a chest location (where key was picked up)
+      .filter(({ tile, index }) => 
+        !excluded.includes(index) &&
+        (tile.tile_type === 'free' || tile.unlocked) &&
+        !tile.item &&
+        !tile.isReservedForChest
       );
     if (emptyTiles.length === 0) {
       showNotification("Board is full. No space for new items.", "error", 2000);
@@ -789,6 +1037,82 @@ export default function LiveopSimulator() {
   const progressData = boardTiles.length > 0 && pathAnalysis ? calculateProgress(boardTiles, pathAnalysis.total_path_tiles) : null;
   const selectedItem = selectedTileIndex !== null ? boardTiles[selectedTileIndex]?.item : null;
   
+  const handleRemoveChain = (chainToRemove) => {
+        if (currentConfig.item_chains.length <= 1) {
+            showNotification("You must have at least one item chain.", "error");
+            return;
+        }
+
+        let preservationRow = -1;
+        boardTiles.forEach(tile => {
+            if (tile.item?.type === 'generator' && tile.tile_type === 'semi_locked') {
+                if (preservationRow === -1 || tile.row < preservationRow) {
+                    preservationRow = tile.row;
+                }
+            }
+        });
+
+        const remainingChains = currentConfig.item_chains.filter(c => c.color !== chainToRemove.color);
+        
+        const newBoard = boardTiles.map(tile => {
+            const newTile = { ...tile };
+
+            if (newTile.item?.chain_color === chainToRemove.color) {
+                if (preservationRow !== -1 && newTile.row <= preservationRow) {
+                    return newTile; 
+                }
+                
+                const replacementChain = remainingChains[Math.floor(Math.random() * remainingChains.length)];
+                newTile.item = {
+                    ...newTile.item,
+                    chain_color: replacementChain.color,
+                    chain_name: replacementChain.chain_name,
+                    chain: replacementChain,
+                    name: `${replacementChain.chain_name} L${newTile.item.level}`
+                };
+            }
+
+            if (newTile.item?.type === 'generator' && newTile.item.chains[0].color === chainToRemove.color) {
+                newTile.item = null;
+                newTile.tile_type = 'free';
+            }
+            
+            return newTile;
+        });
+
+        const newConfig = {
+            ...currentConfig,
+            item_chains: remainingChains
+        };
+        
+        setCurrentConfig(newConfig);
+        setBoardTiles(newBoard);
+        setInitialLayout(JSON.parse(JSON.stringify(newBoard)));
+        const newAnalysis = recalculateAnalysis({ ...newConfig, tiles: newBoard, analysis: pathAnalysis });
+        setPathAnalysis(newAnalysis);
+
+        showNotification(`Chain "${chainToRemove.chain_name}" removed and items converted.`, "success");
+    };
+
+  const handleAddPurpleChain = () => {
+        if (currentConfig.item_chains.some(c => c.color === 'purple')) {
+            showNotification("A Purple chain already exists.", "error");
+            return;
+        }
+
+        const newPurpleChain = {
+            chain_name: 'Purple',
+            color: 'purple',
+            levels: 8,
+        };
+        
+        const newItemChains = [...currentConfig.item_chains, newPurpleChain];
+        const newConfig = { ...currentConfig, item_chains: newItemChains };
+
+        setCurrentConfig(newConfig);
+        showNotification("Purple chain added.", "success");
+    };
+
   return (
     <>
       <NotificationPopup notification={notification} onClose={() => setNotification(null)} />
@@ -852,6 +1176,7 @@ export default function LiveopSimulator() {
                   <Puzzle className="w-5 h-5" />
                   Playground
                 </TabsTrigger>
+                <TabsTrigger value="chains" className="flex items-center gap-2">Manage Chains</TabsTrigger>
               </TabsList>
             </div>
 
@@ -954,6 +1279,8 @@ export default function LiveopSimulator() {
                             isEditing={isEditingBoard}
                             pathAnalysis={pathAnalysis}
                             isLayoutVisible={isLayoutVisible}
+                            bombHoverIndex={bombHoverIndex}
+                            setBombHoverIndex={setBombHoverIndex}
                           />
                       </div>
                       <div className="lg:col-span-1 space-y-4">
@@ -1006,6 +1333,14 @@ export default function LiveopSimulator() {
                   </div>
                 </div>
               )}
+            </TabsContent>
+
+            <TabsContent value="chains">
+              <ChainManagementPanel
+                chains={currentConfig.item_chains}
+                onRemoveChain={handleRemoveChain}
+                onAddPurpleChain={handleAddPurpleChain}
+              />
             </TabsContent>
           </Tabs>
         </div>
