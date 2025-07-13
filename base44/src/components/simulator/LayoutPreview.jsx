@@ -824,14 +824,14 @@ export default function LayoutPreview({ layout, analysis, showDetails = true, co
 } 
 
 LayoutPreview.propTypes = {
-    layout: PropTypes.shape({
-        id: PropTypes.string.isRequired,
-        name: PropTypes.string,
-        tiles: PropTypes.arrayOf(PropTypes.object).isRequired,
-    }).isRequired,
-    analysis: PropTypes.object,
-    showDetails: PropTypes.bool,
-    compact: PropTypes.bool,
-    onPromote: PropTypes.func,
-    onDelete: PropTypes.func,
+  layout: PropTypes.shape({
+    id: PropTypes.oneOfType([PropTypes.string, PropTypes.number]).isRequired,
+    name: PropTypes.string,
+    tiles: PropTypes.arrayOf(PropTypes.object).isRequired,
+  }).isRequired,
+  analysis: PropTypes.object,
+  showDetails: PropTypes.bool,
+  compact: PropTypes.bool,
+  onPromote: PropTypes.func,
+  onDelete: PropTypes.func,
 }; 
